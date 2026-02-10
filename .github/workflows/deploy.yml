@@ -1,0 +1,49 @@
+name: Deploy Empliq Scraper API
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Oracle Cloud
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Copy deploy script to server
+        run: |
+          scp -i ~/.ssh/id_rsa scripts/deploy.sh ubuntu@${{ secrets.INSTANCE_IP }}:/tmp/deploy-scraper.sh
+
+      - name: Execute deployment
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.INSTANCE_IP }} \
+            "chmod +x /tmp/deploy-scraper.sh && sudo SCRAPER_API_KEY='${{ secrets.SCRAPER_API_KEY }}' bash /tmp/deploy-scraper.sh"
+
+      - name: Verify deployment
+        run: |
+          echo "⏳ Esperando 10s para que Traefik registre el servicio..."
+          sleep 10
+          echo "🔍 Verificando healthcheck..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" https://scraper.musuq.me/search/health --max-time 15 2>/dev/null || echo "000")
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Scraper API respondiendo correctamente (HTTP 200)"
+          else
+            echo "⚠️  HTTP $RESPONSE — puede tardar unos minutos en propagarse el SSL"
+          fi
+          echo ""
+          echo "🌐 URLs:"
+          echo "   - API:     https://scraper.musuq.me/search?q=INTERBANK"
+          echo "   - Health:  https://scraper.musuq.me/search/health"
+          echo "   - Swagger: https://scraper.musuq.me/docs"
