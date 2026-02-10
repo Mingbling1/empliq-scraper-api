@@ -21,11 +21,11 @@ export class SearchOrchestratorService {
 
   constructor(
     @Inject('DDG_HTTP_ADAPTER') private ddgHttp: SearchEnginePort,
-    @Inject('PUPPETEER_ADAPTER') private puppeteer: SearchEnginePort,
+    @Inject('BING_HTTP_ADAPTER') private bingHttp: SearchEnginePort,
   ) {
     this.adapters = new Map<SearchStrategy, SearchEnginePort>([
       [SearchStrategy.DDG_HTTP, ddgHttp],
-      [SearchStrategy.PUPPETEER, puppeteer],
+      [SearchStrategy.BING_HTTP, bingHttp],
     ]);
   }
 
@@ -167,7 +167,7 @@ export class SearchOrchestratorService {
   private getDefaultDelay(strategy: SearchStrategy): number {
     const delays: Record<SearchStrategy, { min: number; max: number }> = {
       [SearchStrategy.DDG_HTTP]: { min: 2000, max: 5000 },
-      [SearchStrategy.PUPPETEER]: { min: 5000, max: 10000 },
+      [SearchStrategy.BING_HTTP]: { min: 2000, max: 5000 },
     };
     const range = delays[strategy];
     return Math.floor(Math.random() * (range.max - range.min + 1)) + range.min;

@@ -7,8 +7,7 @@ export const scraperConfig = registerAs('scraper', () => ({
   /** Límites por sesión para cada estrategia */
   limits: {
     ddgHttp: parseInt(process.env.DDG_HTTP_MAX || '200', 10),
-    puppeteer: parseInt(process.env.PUPPETEER_MAX || '80', 10),
-    playwright: parseInt(process.env.PLAYWRIGHT_MAX || '50', 10),
+    bingHttp: parseInt(process.env.BING_HTTP_MAX || '150', 10),
   },
 
   /** Delays entre búsquedas (ms) */
@@ -17,13 +16,9 @@ export const scraperConfig = registerAs('scraper', () => ({
       min: parseInt(process.env.DDG_HTTP_DELAY_MIN || '2000', 10),
       max: parseInt(process.env.DDG_HTTP_DELAY_MAX || '5000', 10),
     },
-    puppeteer: {
-      min: parseInt(process.env.PUPPETEER_DELAY_MIN || '5000', 10),
-      max: parseInt(process.env.PUPPETEER_DELAY_MAX || '10000', 10),
-    },
-    playwright: {
-      min: parseInt(process.env.PLAYWRIGHT_DELAY_MIN || '15000', 10),
-      max: parseInt(process.env.PLAYWRIGHT_DELAY_MAX || '30000', 10),
+    bingHttp: {
+      min: parseInt(process.env.BING_HTTP_DELAY_MIN || '2000', 10),
+      max: parseInt(process.env.BING_HTTP_DELAY_MAX || '5000', 10),
     },
   },
 

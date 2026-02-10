@@ -28,11 +28,10 @@ async function bootstrap() {
   const config = new DocumentBuilder()
     .setTitle('Empliq Scraper API')
     .setDescription(
-      'Microservicio de búsqueda de websites de empresas peruanas.\n\n' +
-      '**3 estrategias disponibles:**\n' +
-      '- `ddg_http` — HTTP puro a DuckDuckGo (rápido, ~1-2s)\n' +
-      '- `puppeteer` — Browser Chromium + DDG/Bing (~5-10s)\n' +
-      '- `playwright` — Firefox multi-motor con comportamiento humano (~15-30s)\n\n' +
+      'Microservicio liviano de búsqueda de websites de empresas peruanas. Sin browser engines.\n\n' +
+      '**2 estrategias disponibles (HTTP puro, sin browser):**\n' +
+      '- `ddg_http` — HTTP directo a DuckDuckGo (rápido, ~1-2s)\n' +
+      '- `bing_http` — HTTP directo a Bing (fallback, ~2-4s)\n\n' +
       '**Autenticación:** Header `x-api-key` requerido en todos los endpoints excepto `/search/health`.\n\n' +
       '**Para n8n:** usa `GET /search?q=EMPRESA` con header `x-api-key`.',
     )
