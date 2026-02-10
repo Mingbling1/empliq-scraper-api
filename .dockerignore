@@ -1,2 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
 .env
 .env.local
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.github/
+
+# IDE
+.vscode/
+.idea/
+
+# Scripts
+scripts/
+
+# Docs
+README.md
+*.md
+
+# Debug
+debug_screenshot.png
+
+# OS
+.DS_Store
+Thumbs.db
