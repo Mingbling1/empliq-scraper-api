@@ -22,19 +22,14 @@ RUN npm run build
 # ─── Stage 2: Production ─────────────────────────────
 FROM node:20-slim
 
-# Deps del SO para Chromium (Puppeteer) y Firefox (Playwright)
+# Deps del SO para Chromium (Puppeteer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  # Chromium deps
   libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
   libcups2 libdrm2 libdbus-1-3 libxkbcommon0 \
   libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
   libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
   libx11-xcb1 \
-  # Firefox deps
-  libgtk-3-0 libx11-6 libxext6 libxrender1 \
-  # Fonts para renderizado correcto
   fonts-noto-core fonts-freefont-ttf \
-  # Utilidades
   wget ca-certificates dumb-init \
   && rm -rf /var/lib/apt/lists/*
 
@@ -48,9 +43,7 @@ COPY package.json ./
 COPY package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
-# Instalar browsers (con fallback si alguno falla en ARM64)
-ENV PLAYWRIGHT_BROWSERS_PATH=/app/.browsers
-RUN npx playwright install firefox --with-deps 2>/dev/null || echo "⚠️ Firefox install skipped"
+# Instalar Chrome para Puppeteer
 RUN npx puppeteer browsers install chrome 2>/dev/null || echo "⚠️ Chrome install skipped"
 
 # Copiar build compilado
