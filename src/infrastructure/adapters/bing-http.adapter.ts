@@ -5,7 +5,7 @@ import { SearchEnginePort } from '../../domain/ports/search-engine.port';
 import { SearchResult, SearchResultItem } from '../../domain/entities/search-result.entity';
 import { StrategyStatus } from '../../domain/entities/strategy-status.entity';
 import { SearchStrategy } from '../../domain/enums/search-strategy.enum';
-import { cleanCompanyName } from '../../shared/utils/company-name-cleaner';
+import { cleanCompanyName, generateSearchVariants } from '../../shared/utils/company-name-cleaner';
 import { rankResults } from '../../shared/utils/url-scorer';
 
 /**
@@ -40,24 +40,71 @@ export class BingHttpAdapter implements SearchEnginePort, OnModuleDestroy {
   async search(companyName: string): Promise<SearchResult | null> {
     const startTime = Date.now();
     const cleanName = cleanCompanyName(companyName);
-    const query = `"${cleanName}" peru sitio web oficial -site:linkedin.com -site:facebook.com`;
+    const variants = generateSearchVariants(companyName);
 
-    this.logger.log(`[Bing HTTP] Buscando: "${companyName}" → query: ${query}`);
+    // ── Estrategia multi-query con lenguaje natural ──
+    // NO usar site:.pe (muchas empresas peruanas tienen .com: viabcp.com, etc.)
+    // Bing soporta intitle: que es útil
+    const negations = '-site:linkedin.com -site:facebook.com -site:wikipedia.org -site:computrabajo.com -site:glassdoor.com -site:indeed.com';
+
+    const queries: string[] = [
+      // Q1: Nombre exacto + página web oficial + negaciones
+      `"${cleanName}" página web oficial peru ${negations}`,
+    ];
+
+    // Q2-Q3: Variantes/acrónimos — probar TEMPRANO
+    for (const variant of variants) {
+      if (variant !== cleanName && variant.length >= 2) {
+        queries.push(`"${variant}" página web oficial peru ${negations}`);
+      }
+    }
+
+    // Q4: intitle para relevancia alta
+    queries.push(`intitle:"${cleanName}" peru empresa`);
+
+    // Q5: Flexible sin comillas
+    queries.push(`${cleanName} peru web oficial empresa ${negations}`);
+
+    // Q6: Solo nombre + peru (máxima flexibilidad)
+    queries.push(`${cleanName} peru empresa`);
+
+    this.logger.log(`[Bing HTTP] Buscando: "${companyName}" → cleanName: "${cleanName}", variants: [${variants.join(', ')}]`);
 
     try {
-      let html = await this.fetchBingHTML(query);
-      let rawResults = this.parseBingResults(html);
+      let rawResults: Array<{ url: string; title: string }> = [];
 
-      // Retry con query más simple si no hay resultados
-      if (rawResults.length === 0) {
-        const retryQuery = `${cleanName} peru web oficial empresa`;
-        this.logger.log(`[Bing HTTP] Retry con query simple: ${retryQuery}`);
-        await this.sleep(2000);
-        html = await this.fetchBingHTML(retryQuery);
-        rawResults = this.parseBingResults(html);
+      for (let i = 0; i < queries.length; i++) {
+        const query = queries[i];
+        this.logger.log(`[Bing HTTP] Query ${i + 1}/${queries.length}: ${query}`);
+
+        if (i > 0) await this.sleep(2000);
+        const html = await this.fetchBingHTML(query);
+        const parsed = this.parseBingResults(html);
+
+        if (parsed.length > 0) {
+          if (rawResults.length > 0) {
+            rawResults = [...rawResults, ...parsed];
+          } else {
+            rawResults = parsed;
+          }
+          this.logger.log(`[Bing HTTP] ✓ ${parsed.length} resultados con query ${i + 1}`);
+
+          // Rankear y decidir si parar
+          const tempRanked = rankResults(rawResults, companyName, variants);
+          if (tempRanked.length > 0) {
+            const best = tempRanked[0];
+            const isHomepage = this.isHomepageUrl(best.url);
+            const threshold = isHomepage ? 20 : 25;
+            if (best.score >= threshold) {
+              this.logger.log(`[Bing HTTP] Score ${best.score} >= ${threshold} (homepage=${isHomepage}), suficiente`);
+              break;
+            }
+            this.logger.log(`[Bing HTTP] Score ${best.score} < ${threshold}, intentando más queries...`);
+          }
+        }
       }
 
-      const ranked = rankResults(rawResults, companyName);
+      const ranked = rankResults(rawResults, companyName, variants);
       const elapsed = Date.now() - startTime;
 
       if (ranked.length === 0) {
@@ -217,9 +264,17 @@ export class BingHttpAdapter implements SearchEnginePort, OnModuleDestroy {
         }
         // Limpiar ... y espacios de la URL
         cite = cite.replace(/\s/g, '').replace(/…/g, '').replace(/\.\.\./g, '');
+
+        // Extraer solo el dominio base (evitar URLs con paths rotos del cite)
         try {
           const parsed = new URL(cite);
-          if (!parsed.hostname.includes('bing.com')) {
+          // Validar que el hostname tiene un TLD válido (al menos un punto)
+          if (
+            !parsed.hostname.includes('bing.com') &&
+            parsed.hostname.includes('.') &&
+            !parsed.hostname.startsWith('xn--') &&
+            !/xn--/.test(parsed.hostname.split('.')[0]) // evitar punycode roto
+          ) {
             results.push({ url: parsed.origin, title: '' });
           }
         } catch {
@@ -229,6 +284,19 @@ export class BingHttpAdapter implements SearchEnginePort, OnModuleDestroy {
     }
 
     return results;
+  }
+
+  /**
+   * Verifica si la URL es una homepage (raíz del sitio).
+   */
+  private isHomepageUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      return path === '/' || path === '' || /^\/[a-z]{2}(-[A-Z]{2})?\/?$/.test(path);
+    } catch {
+      return false;
+    }
   }
 
   private sleep(ms: number): Promise<void> {
