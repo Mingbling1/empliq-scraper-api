@@ -268,12 +268,15 @@ export class BingHttpAdapter implements SearchEnginePort, OnModuleDestroy {
         // Extraer solo el dominio base (evitar URLs con paths rotos del cite)
         try {
           const parsed = new URL(cite);
-          // Validar que el hostname tiene un TLD válido (al menos un punto)
+          const hostname = parsed.hostname;
+          // Validar que el hostname tiene un TLD válido y no tiene punycode roto
           if (
-            !parsed.hostname.includes('bing.com') &&
-            parsed.hostname.includes('.') &&
-            !parsed.hostname.startsWith('xn--') &&
-            !/xn--/.test(parsed.hostname.split('.')[0]) // evitar punycode roto
+            !hostname.includes('bing.com') &&
+            !hostname.includes('microsoft.com') &&
+            !hostname.includes('google.com') &&
+            hostname.includes('.') &&
+            !/xn--/.test(hostname) && // rechazar CUALQUIER punycode en el hostname
+            hostname.split('.').every(part => part.length <= 30) // partes de dominio razonables
           ) {
             results.push({ url: parsed.origin, title: '' });
           }

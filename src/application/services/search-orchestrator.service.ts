@@ -82,16 +82,50 @@ export class SearchOrchestratorService {
       const result = await adapter.search(companyName);
 
       if (result && result.found) {
+        // Si el score es alto (>=15), aceptar inmediatamente
+        if (result.score >= 15) {
+          return { result, strategyUsed: strategy };
+        }
+        // Score medio (8-14): guardar como mejor candidato pero seguir buscando
+        this.logger.log(`${strategy} encontró resultado con score bajo (${result.score}), probando siguiente...`);
+        // Retornar este resultado si no hay mejor en las siguientes estrategias
+        const fallbackResult = await this.tryRemainingStrategies(companyName, strategy, STRATEGY_PRIORITY);
+        if (fallbackResult && fallbackResult.result && fallbackResult.result.score > result.score) {
+          return fallbackResult;
+        }
         return { result, strategyUsed: strategy };
       }
 
-      // Si el resultado es null, intentar con la siguiente estrategia
+      // Si el resultado es null o found=false, intentar con la siguiente estrategia
       this.logger.log(`${strategy} no encontró resultado, probando siguiente...`);
     }
 
     // Ninguna estrategia encontró resultado
     const lastStrategy = STRATEGY_PRIORITY[STRATEGY_PRIORITY.length - 1];
     return { result: null, strategyUsed: lastStrategy };
+  }
+
+  /**
+   * Intenta las estrategias restantes después de la actual.
+   */
+  private async tryRemainingStrategies(
+    companyName: string,
+    currentStrategy: SearchStrategy,
+    priorities: readonly SearchStrategy[],
+  ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy } | null> {
+    const currentIndex = priorities.indexOf(currentStrategy);
+    for (let i = currentIndex + 1; i < priorities.length; i++) {
+      const strategy = priorities[i];
+      const adapter = this.adapters.get(strategy);
+      if (!adapter || !adapter.isAvailable()) continue;
+
+      this.logger.log(`[Fallback] Intentando ${strategy} para mejorar score...`);
+      const result = await adapter.search(companyName);
+      if (result && result.found) {
+        return { result, strategyUsed: strategy };
+      }
+    }
+    return null;
   }
 
   /**

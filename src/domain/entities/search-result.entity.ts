@@ -63,7 +63,11 @@ export class SearchResult {
     this.timestamp = new Date();
   }
 
+  /**
+   * Un resultado se considera "encontrado" solo si tiene un score mínimo razonable.
+   * Score 2 = solo bonus HTTPS (basura). Score 8+ = al menos una palabra del nombre en el dominio.
+   */
   get found(): boolean {
-    return this.website !== null && this.score > 0;
+    return this.website !== null && this.score >= 8;
   }
 }
