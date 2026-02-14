@@ -2,17 +2,23 @@ import { Injectable, Inject, Logger } from '@nestjs/common';
 import { SearchEnginePort } from '../../domain/ports/search-engine.port';
 import { SearchResult } from '../../domain/entities/search-result.entity';
 import { StrategyStatus } from '../../domain/entities/strategy-status.entity';
-import { SearchStrategy, STRATEGY_PRIORITY } from '../../domain/enums/search-strategy.enum';
+import {
+  SearchStrategy,
+  STRATEGY_PRIORITY,
+  DIRECTORY_STRATEGY_PRIORITY,
+} from '../../domain/enums/search-strategy.enum';
 
 /**
- * Orquestador inteligente de estrategias de búsqueda.
+ * Orquestador inteligente de estrategias de búsqueda con 2 fases:
  *
- * Funciona así:
- * 1. Si se pide una estrategia específica, la usa directamente.
- * 2. Si no, elige automáticamente por prioridad (rápido → lento):
- *    DDG HTTP → Puppeteer → Playwright
- * 3. Si la estrategia elegida falla o está agotada, pasa a la siguiente.
- * 4. Expone el estado de todas las estrategias para que n8n sepa cuándo cambiar.
+ * FASE 1 — Búsqueda directa (web propia de la empresa):
+ *   DDG HTTP → Bing HTTP
+ *
+ * FASE 2 — Fallback a directorios (cuando no se encuentra web propia):
+ *   UniversidadPeru.com → DatosPeru.org
+ *
+ * Si se pide una estrategia específica, la usa directamente.
+ * Si falla, pasa al fallback automático.
  */
 @Injectable()
 export class SearchOrchestratorService {
@@ -22,23 +28,25 @@ export class SearchOrchestratorService {
   constructor(
     @Inject('DDG_HTTP_ADAPTER') private ddgHttp: SearchEnginePort,
     @Inject('BING_HTTP_ADAPTER') private bingHttp: SearchEnginePort,
+    @Inject('UNIV_PERU_HTTP_ADAPTER') private univPeruHttp: SearchEnginePort,
+    @Inject('DATOS_PERU_HTTP_ADAPTER') private datosPeruHttp: SearchEnginePort,
   ) {
     this.adapters = new Map<SearchStrategy, SearchEnginePort>([
       [SearchStrategy.DDG_HTTP, ddgHttp],
       [SearchStrategy.BING_HTTP, bingHttp],
+      [SearchStrategy.UNIV_PERU_HTTP, univPeruHttp],
+      [SearchStrategy.DATOS_PERU_HTTP, datosPeruHttp],
     ]);
   }
 
   /**
    * Busca la web oficial de una empresa.
-   * Si no se especifica estrategia, usa la primera disponible por prioridad.
-   * Si falla, intenta con la siguiente.
+   * Si no se especifica estrategia, usa búsqueda automática con 2 fases.
    */
   async search(
     companyName: string,
     preferredStrategy?: SearchStrategy,
   ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy }> {
-    // Si se pide una estrategia específica, usarla directamente
     if (preferredStrategy) {
       const adapter = this.adapters.get(preferredStrategy);
       if (!adapter) {
@@ -50,7 +58,6 @@ export class SearchOrchestratorService {
         this.logger.warn(
           `Estrategia ${preferredStrategy} no disponible (agotada/cooldown)`,
         );
-        // Intentar con las demás automáticamente
         return this.searchWithFallback(companyName, preferredStrategy);
       }
 
@@ -58,17 +65,19 @@ export class SearchOrchestratorService {
       return { result, strategyUsed: preferredStrategy };
     }
 
-    // Automático: intentar por prioridad
     return this.searchWithFallback(companyName);
   }
 
   /**
-   * Búsqueda con fallback automático entre estrategias.
+   * Búsqueda con fallback automático en 2 fases:
+   * Fase 1: DDG → Bing (busca web propia de la empresa)
+   * Fase 2: UniversidadPeru → DatosPeru (directorios de empresas peruanas)
    */
   private async searchWithFallback(
     companyName: string,
     skipStrategy?: SearchStrategy,
   ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy }> {
+    // ═══ FASE 1: Búsqueda directa (web propia de la empresa) ═══
     for (const strategy of STRATEGY_PRIORITY) {
       if (strategy === skipStrategy) continue;
 
@@ -82,37 +91,73 @@ export class SearchOrchestratorService {
       const result = await adapter.search(companyName);
 
       if (result && result.found) {
-        // Si el score es alto (>=15), aceptar inmediatamente
         if (result.score >= 15) {
           return { result, strategyUsed: strategy };
         }
-        // Score medio (8-14): guardar como mejor candidato pero seguir buscando
-        this.logger.log(`${strategy} encontró resultado con score bajo (${result.score}), probando siguiente...`);
-        // Retornar este resultado si no hay mejor en las siguientes estrategias
-        const fallbackResult = await this.tryRemainingStrategies(companyName, strategy, STRATEGY_PRIORITY);
-        if (fallbackResult && fallbackResult.result && fallbackResult.result.score > result.score) {
+        this.logger.log(
+          `${strategy} encontró resultado con score bajo (${result.score}), probando siguiente...`,
+        );
+        const fallbackResult = await this.tryRemainingStrategies(
+          companyName,
+          strategy,
+          STRATEGY_PRIORITY,
+        );
+        if (
+          fallbackResult &&
+          fallbackResult.result &&
+          fallbackResult.result.score > result.score
+        ) {
           return fallbackResult;
         }
         return { result, strategyUsed: strategy };
       }
 
-      // Si el resultado es null o found=false, intentar con la siguiente estrategia
       this.logger.log(`${strategy} no encontró resultado, probando siguiente...`);
     }
 
-    // Ninguna estrategia encontró resultado
-    const lastStrategy = STRATEGY_PRIORITY[STRATEGY_PRIORITY.length - 1];
+    // ═══ FASE 2: Fallback a directorios (universidadperu.com, datosperu.org) ═══
+    this.logger.log(
+      `🗂️ No se encontró web propia para "${companyName}", intentando directorios...`,
+    );
+
+    for (const strategy of DIRECTORY_STRATEGY_PRIORITY) {
+      const adapter = this.adapters.get(strategy);
+      if (!adapter || !adapter.isAvailable()) {
+        this.logger.log(`Saltando directorio ${strategy} (no disponible)`);
+        continue;
+      }
+
+      this.logger.log(`Intentando directorio ${strategy}...`);
+      const result = await adapter.search(companyName);
+
+      if (result && result.found) {
+        this.logger.log(
+          `✅ Directorio ${strategy} encontró: ${result.website} (score: ${result.score})`,
+        );
+        return { result, strategyUsed: strategy };
+      }
+
+      this.logger.log(`Directorio ${strategy} no encontró resultado...`);
+    }
+
+    // Ninguna estrategia (ni directorio) encontró resultado
+    const lastStrategy =
+      DIRECTORY_STRATEGY_PRIORITY[DIRECTORY_STRATEGY_PRIORITY.length - 1] ||
+      STRATEGY_PRIORITY[STRATEGY_PRIORITY.length - 1];
     return { result: null, strategyUsed: lastStrategy };
   }
 
   /**
-   * Intenta las estrategias restantes después de la actual.
+   * Intenta las estrategias restantes después de la actual (dentro de la misma fase).
    */
   private async tryRemainingStrategies(
     companyName: string,
     currentStrategy: SearchStrategy,
     priorities: readonly SearchStrategy[],
-  ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy } | null> {
+  ): Promise<{
+    result: SearchResult | null;
+    strategyUsed: SearchStrategy;
+  } | null> {
     const currentIndex = priorities.indexOf(currentStrategy);
     for (let i = currentIndex + 1; i < priorities.length; i++) {
       const strategy = priorities[i];
@@ -129,7 +174,7 @@ export class SearchOrchestratorService {
   }
 
   /**
-   * Búsqueda por lote con la misma estrategia.
+   * Búsqueda por lote.
    */
   async batchSearch(
     companies: Array<{ ruc?: string; name: string }>,
@@ -159,7 +204,6 @@ export class SearchOrchestratorService {
 
       results.push({ ruc, company: name, result, strategyUsed });
 
-      // Delay entre búsquedas
       if (i < companies.length - 1) {
         const delay = delayMs || this.getDefaultDelay(strategyUsed);
         await this.sleep(delay);
@@ -170,13 +214,15 @@ export class SearchOrchestratorService {
   }
 
   /**
-   * Estado de todas las estrategias.
-   * Clave para n8n: saber cuántas consultas quedan y si hay cooldown.
+   * Estado de TODAS las estrategias (directas + directorios).
    */
   getAllStatuses(): StrategyStatus[] {
-    return STRATEGY_PRIORITY.map((strategy) => {
+    const allStrategies = [...STRATEGY_PRIORITY, ...DIRECTORY_STRATEGY_PRIORITY];
+    return allStrategies.map((strategy) => {
       const adapter = this.adapters.get(strategy);
-      return adapter ? adapter.getStatus() : new StrategyStatus({ strategy, maxPerSession: 0 });
+      return adapter
+        ? adapter.getStatus()
+        : new StrategyStatus({ strategy, maxPerSession: 0 });
     });
   }
 
@@ -195,13 +241,12 @@ export class SearchOrchestratorService {
     this.logger.log(`Contadores reseteados: ${strategy || 'todas'}`);
   }
 
-  /**
-   * Delay por defecto según la estrategia (para no saturar).
-   */
   private getDefaultDelay(strategy: SearchStrategy): number {
     const delays: Record<SearchStrategy, { min: number; max: number }> = {
       [SearchStrategy.DDG_HTTP]: { min: 2000, max: 5000 },
       [SearchStrategy.BING_HTTP]: { min: 2000, max: 5000 },
+      [SearchStrategy.UNIV_PERU_HTTP]: { min: 1500, max: 3000 },
+      [SearchStrategy.DATOS_PERU_HTTP]: { min: 1500, max: 3000 },
     };
     const range = delays[strategy];
     return Math.floor(Math.random() * (range.max - range.min + 1)) + range.min;
