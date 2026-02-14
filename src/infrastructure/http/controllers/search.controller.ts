@@ -49,11 +49,12 @@ export class SearchController {
   })
   @ApiResponse({ status: 200, type: SearchResponseDto })
   async searchCompany(@Query() dto: SearchCompanyDto): Promise<SearchResponseDto> {
-    this.logger.log(`🔍 Search: "${dto.q}" | strategy: ${dto.strategy || 'auto'}`);
+    this.logger.log(`🔍 Search: "${dto.q}" | ruc: ${dto.ruc || 'N/A'} | strategy: ${dto.strategy || 'auto'}`);
 
     const { result, strategyUsed } = await this.orchestrator.search(
       dto.q,
       dto.strategy,
+      dto.ruc,
     );
     const statuses = this.orchestrator.getAllStatuses();
 

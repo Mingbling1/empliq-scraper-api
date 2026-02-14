@@ -28,9 +28,15 @@ export function cleanCompanyName(name: string): string {
   }
 
   // Prefijos genéricos
-  const prefixes = ['EMPRESA', 'COMPANIA', 'COMPAÑIA', 'CORPORACION', 'GRUPO'];
+  const prefixes = [
+    'EMPRESA', 'COMPANIA', 'COMPAÑIA', 'CORPORACION', 'GRUPO',
+    // Gobierno: quitar prefijos de área/departamento que no aportan a la búsqueda
+    'DIRECCION', 'DIRECCIÓN', 'OFICINA', 'UNIDAD', 'DIVISION', 'DIVISIÓN',
+    'DEPARTAMENTO', 'GERENCIA', 'JEFATURA', 'SUBGERENCIA', 'SUBDIRECCIÓN',
+    'SUBDIRECCION', 'AREA', 'ÁREA',
+  ];
   for (const p of prefixes) {
-    clean = clean.replace(new RegExp('^' + p + '\\b\\s*', 'gi'), '');
+    clean = clean.replace(new RegExp('^' + p + '\\b\\s*(DE\\s+)?', 'gi'), '');
   }
 
   // Quitar sufijos geográficos genéricos ("DEL PERU", "DEL PERÚ", "PERU", "PERÚ")

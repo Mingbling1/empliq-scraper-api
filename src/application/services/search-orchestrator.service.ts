@@ -46,6 +46,7 @@ export class SearchOrchestratorService {
   async search(
     companyName: string,
     preferredStrategy?: SearchStrategy,
+    ruc?: string,
   ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy }> {
     if (preferredStrategy) {
       const adapter = this.adapters.get(preferredStrategy);
@@ -58,14 +59,14 @@ export class SearchOrchestratorService {
         this.logger.warn(
           `Estrategia ${preferredStrategy} no disponible (agotada/cooldown)`,
         );
-        return this.searchWithFallback(companyName, preferredStrategy);
+        return this.searchWithFallback(companyName, ruc, preferredStrategy);
       }
 
-      const result = await adapter.search(companyName);
+      const result = await adapter.search(companyName, ruc);
       return { result, strategyUsed: preferredStrategy };
     }
 
-    return this.searchWithFallback(companyName);
+    return this.searchWithFallback(companyName, ruc);
   }
 
   /**
@@ -75,6 +76,7 @@ export class SearchOrchestratorService {
    */
   private async searchWithFallback(
     companyName: string,
+    ruc?: string,
     skipStrategy?: SearchStrategy,
   ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy }> {
     // ═══ FASE 1: Búsqueda directa (web propia de la empresa) ═══
@@ -88,7 +90,7 @@ export class SearchOrchestratorService {
       }
 
       this.logger.log(`Intentando con ${strategy}...`);
-      const result = await adapter.search(companyName);
+      const result = await adapter.search(companyName, ruc);
 
       if (result && result.found) {
         if (result.score >= 15) {
@@ -99,6 +101,7 @@ export class SearchOrchestratorService {
         );
         const fallbackResult = await this.tryRemainingStrategies(
           companyName,
+          ruc,
           strategy,
           STRATEGY_PRIORITY,
         );
@@ -128,7 +131,7 @@ export class SearchOrchestratorService {
       }
 
       this.logger.log(`Intentando directorio ${strategy}...`);
-      const result = await adapter.search(companyName);
+      const result = await adapter.search(companyName, ruc);
 
       if (result && result.found) {
         this.logger.log(
@@ -152,6 +155,7 @@ export class SearchOrchestratorService {
    */
   private async tryRemainingStrategies(
     companyName: string,
+    ruc: string | undefined,
     currentStrategy: SearchStrategy,
     priorities: readonly SearchStrategy[],
   ): Promise<{
@@ -165,7 +169,7 @@ export class SearchOrchestratorService {
       if (!adapter || !adapter.isAvailable()) continue;
 
       this.logger.log(`[Fallback] Intentando ${strategy} para mejorar score...`);
-      const result = await adapter.search(companyName);
+      const result = await adapter.search(companyName, ruc);
       if (result && result.found) {
         return { result, strategyUsed: strategy };
       }
@@ -200,7 +204,7 @@ export class SearchOrchestratorService {
 
       this.logger.log(`[Batch ${i + 1}/${companies.length}] "${name}"`);
 
-      const { result, strategyUsed } = await this.search(name, preferredStrategy);
+      const { result, strategyUsed } = await this.search(name, preferredStrategy, ruc);
 
       results.push({ ruc, company: name, result, strategyUsed });
 

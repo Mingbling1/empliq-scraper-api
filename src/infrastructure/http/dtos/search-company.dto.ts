@@ -27,6 +27,14 @@ export class SearchCompanyDto {
   q!: string;
 
   @ApiPropertyOptional({
+    description: 'RUC de la empresa (mejora la búsqueda en directorios peruanos)',
+    example: '20100130204',
+  })
+  @IsOptional()
+  @IsString()
+  ruc?: string;
+
+  @ApiPropertyOptional({
     description: 'Estrategia específica a usar. Si no se indica, el orquestador elige automáticamente.',
     enum: SearchStrategy,
     example: SearchStrategy.DDG_HTTP,

@@ -37,7 +37,8 @@ export class BingHttpAdapter implements SearchEnginePort, OnModuleDestroy {
     await this.dispose();
   }
 
-  async search(companyName: string): Promise<SearchResult | null> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async search(companyName: string, _ruc?: string): Promise<SearchResult | null> {
     const startTime = Date.now();
     const cleanName = cleanCompanyName(companyName);
     const variants = generateSearchVariants(companyName);

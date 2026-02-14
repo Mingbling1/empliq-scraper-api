@@ -18,9 +18,10 @@ export interface SearchEnginePort {
   /**
    * Busca la página web oficial de una empresa.
    * @param companyName Nombre de la empresa (puede incluir SAC, SRL, etc.)
+   * @param ruc RUC de la empresa (opcional, mejora búsqueda en directorios)
    * @returns Resultado de búsqueda o null si no encuentra
    */
-  search(companyName: string): Promise<SearchResult | null>;
+  search(companyName: string, ruc?: string): Promise<SearchResult | null>;
 
   /** Estado actual de la estrategia (rate limits, cooldown, etc.) */
   getStatus(): StrategyStatus;

@@ -42,17 +42,24 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
     await this.dispose();
   }
 
-  async search(companyName: string): Promise<SearchResult | null> {
+  async search(companyName: string, ruc?: string): Promise<SearchResult | null> {
     const startTime = Date.now();
     const cleanName = cleanCompanyName(companyName);
     const variants = generateSearchVariants(companyName);
 
     // Queries optimizadas para encontrar la ficha en universidadperu.com
-    // El usuario probó que "EMPRESA universidad perú" funciona muy bien
-    const queries: string[] = [
-      `${cleanName} universidad peru`,
-      `"${cleanName}" site:${TARGET_DOMAIN}`,
-    ];
+    // PRIORIDAD 1: Búsqueda por RUC (más confiable — URLs contienen el RUC)
+    // ej: universidadperu.com/empresas/nombre-slug-20165465009.php
+    const queries: string[] = [];
+
+    if (ruc) {
+      queries.push(`${ruc} site:${TARGET_DOMAIN}`);
+      queries.push(`${ruc} universidad peru`);
+    }
+
+    // PRIORIDAD 2: Búsqueda por nombre
+    queries.push(`${cleanName} universidad peru`);
+    queries.push(`"${cleanName}" site:${TARGET_DOMAIN}`);
 
     for (const variant of variants) {
       if (variant !== cleanName && variant.length >= 3) {
@@ -68,7 +75,7 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
       let bestScore = 0;
       const allFound: SearchResultItem[] = [];
 
-      for (let i = 0; i < Math.min(queries.length, 3); i++) {
+      for (let i = 0; i < Math.min(queries.length, 4); i++) {
         const query = queries[i];
         this.logger.log(`[UnivPeru] Query ${i + 1}: ${query}`);
 

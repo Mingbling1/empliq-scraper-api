@@ -44,16 +44,23 @@ export class DatosPeruHttpAdapter implements SearchEnginePort, OnModuleDestroy {
     await this.dispose();
   }
 
-  async search(companyName: string): Promise<SearchResult | null> {
+  async search(companyName: string, ruc?: string): Promise<SearchResult | null> {
     const startTime = Date.now();
     const cleanName = cleanCompanyName(companyName);
     const variants = generateSearchVariants(companyName);
 
     // Queries para encontrar la ficha en datosperu.org
-    const queries: string[] = [
-      `${cleanName} datos peru`,
-      `"${cleanName}" site:${TARGET_DOMAIN}`,
-    ];
+    // PRIORIDAD 1: Búsqueda por RUC (más confiable)
+    const queries: string[] = [];
+
+    if (ruc) {
+      queries.push(`${ruc} site:${TARGET_DOMAIN}`);
+      queries.push(`${ruc} datos peru`);
+    }
+
+    // PRIORIDAD 2: Búsqueda por nombre
+    queries.push(`${cleanName} datos peru`);
+    queries.push(`"${cleanName}" site:${TARGET_DOMAIN}`);
 
     for (const variant of variants) {
       if (variant !== cleanName && variant.length >= 3) {
@@ -69,7 +76,7 @@ export class DatosPeruHttpAdapter implements SearchEnginePort, OnModuleDestroy {
       let bestScore = 0;
       const allFound: SearchResultItem[] = [];
 
-      for (let i = 0; i < Math.min(queries.length, 3); i++) {
+      for (let i = 0; i < Math.min(queries.length, 4); i++) {
         const query = queries[i];
         this.logger.log(`[DatosPeru] Query ${i + 1}: ${query}`);
 
