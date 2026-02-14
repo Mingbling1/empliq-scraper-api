@@ -23,9 +23,9 @@ RUN npm run build
 # ─── Stage 2: Production ─────────────────────────────
 FROM node:20-slim
 
-# Sólo deps mínimas del SO (ca-certificates para HTTPS, dumb-init para signals)
+# Sólo deps mínimas del SO (ca-certificates para HTTPS, dumb-init para signals, curl para fallback scraping)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  wget ca-certificates dumb-init \
+  wget ca-certificates dumb-init curl \
   && rm -rf /var/lib/apt/lists/*
 
 # Usuario no-root para seguridad
