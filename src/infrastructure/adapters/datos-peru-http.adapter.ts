@@ -207,6 +207,7 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         {
           method: 'GET',
           agent,
+          rejectUnauthorized: false, // proxies SOCKS5 pueden presentar cert diferente
           headers: {
             'User-Agent': ua,
             Accept:
