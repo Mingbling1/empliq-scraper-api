@@ -1,6 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as https from 'https';
+import * as http from 'http';
 import * as cheerio from 'cheerio';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import {
   DatosPeruEnrichmentPort,
 } from '../../domain/ports/datos-peru-enrichment.port';
@@ -22,9 +24,39 @@ const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
+/** SOCKS5 proxies comprobados que pasan Cloudflare */
+const SEED_PROXIES: string[] = [
+  'socks5h://192.111.134.10:4145',
+  'socks5h://192.252.209.158:4145',
+  'socks5h://192.252.208.70:14282',
+  'socks5h://198.8.94.174:39078',
+  'socks5h://184.178.172.5:15303',
+];
+
+/** URL de lista SOCKS5 pública para refrescar proxies */
+const PROXY_LIST_URL =
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt';
+
 @Injectable()
-export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort {
+export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleInit {
   private readonly logger = new Logger(DatosPeruHttpAdapter.name);
+
+  /** Pool de proxies activos (socks5h://host:port) */
+  private proxies: string[] = [...SEED_PROXIES];
+  /** Índice round-robin */
+  private proxyIdx = 0;
+  /** Cuántos reintentos por request */
+  private readonly MAX_RETRIES = 3;
+
+  // ════════════════════════════════════════════════════════
+  //  LIFECYCLE
+  // ════════════════════════════════════════════════════════
+
+  async onModuleInit(): Promise<void> {
+    this.logger.log(`[DatosPeru] Inicializando con ${this.proxies.length} proxies seed`);
+    // Refrescar proxies en background (no bloquea startup)
+    this.refreshProxies().catch(() => {});
+  }
 
   // ════════════════════════════════════════════════════════
   //  PUBLIC API
@@ -71,6 +103,172 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort {
   }
 
   // ════════════════════════════════════════════════════════
+  //  PROXY MANAGEMENT
+  // ════════════════════════════════════════════════════════
+
+  /** Obtiene un proxy SOCKS5 del pool (round-robin) */
+  private nextProxy(): string {
+    const proxy = this.proxies[this.proxyIdx % this.proxies.length];
+    this.proxyIdx++;
+    return proxy;
+  }
+
+  /** Crea un SocksProxyAgent para el proxy dado */
+  private makeAgent(proxyUrl: string): SocksProxyAgent {
+    return new SocksProxyAgent(proxyUrl);
+  }
+
+  /** Refresca la lista de proxies desde GitHub */
+  private async refreshProxies(): Promise<void> {
+    try {
+      const body = await this.fetchRaw(PROXY_LIST_URL, 10000);
+      if (!body) return;
+
+      const lines = body
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(l))
+        .slice(0, 60); // limitar para no testear demasiados
+
+      if (lines.length === 0) return;
+
+      this.logger.log(`[DatosPeru] Testeando ${lines.length} proxies SOCKS5...`);
+
+      // Testear en paralelo con timeout corto
+      const working: string[] = [];
+      const testUrl = `${BASE_URL}${SEARCH_PATH}?buscar=20100047218`;
+
+      const promises = lines.map(async (line) => {
+        const proxyUrl = `socks5h://${line}`;
+        try {
+          const agent = this.makeAgent(proxyUrl);
+          const html = await this.httpGet(testUrl, agent, 8000);
+          if (html && html.length > 5000 && html.includes('datosperu')) {
+            working.push(proxyUrl);
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      await Promise.allSettled(promises);
+
+      if (working.length > 0) {
+        this.proxies = working;
+        this.proxyIdx = 0;
+        this.logger.log(
+          `[DatosPeru] ✅ ${working.length} proxies funcionales encontrados`,
+        );
+      } else {
+        this.logger.warn(
+          `[DatosPeru] No se encontraron proxies nuevos, manteniendo ${this.proxies.length} seed`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[DatosPeru] Error refrescando proxies: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /** GET plain (sin proxy) para obtener la lista de proxies */
+  private fetchRaw(url: string, timeoutMs: number): Promise<string | null> {
+    return new Promise((resolve) => {
+      const proto = url.startsWith('https') ? https : http;
+      const req = proto.request(url, { method: 'GET' }, (res) => {
+        if (res.statusCode !== 200) { resolve(null); return; }
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      });
+      req.on('error', () => resolve(null));
+      req.setTimeout(timeoutMs, () => { req.destroy(); resolve(null); });
+      req.end();
+    });
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  HTTP — Core GET with SOCKS5 proxy + retries
+  // ════════════════════════════════════════════════════════
+
+  /**
+   * HTTPS GET a través de un proxy SOCKS5.
+   * Reintenta con distintos proxies si falla.
+   */
+  private httpGet(
+    url: string,
+    agent: SocksProxyAgent,
+    timeoutMs = 15000,
+  ): Promise<string | null> {
+    return new Promise((resolve) => {
+      const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+      const req = https.request(
+        url,
+        {
+          method: 'GET',
+          agent,
+          headers: {
+            'User-Agent': ua,
+            Accept:
+              'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'es-PE,es;q=0.9,en;q=0.8',
+            Referer: `${BASE_URL}/`,
+          },
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume(); // drain
+            resolve(null);
+            return;
+          }
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () =>
+            resolve(Buffer.concat(chunks).toString('utf-8')),
+          );
+        },
+      );
+      req.on('error', () => resolve(null));
+      req.setTimeout(timeoutMs, () => {
+        req.destroy();
+        resolve(null);
+      });
+      req.end();
+    });
+  }
+
+  /**
+   * GET con rotación de proxies y reintentos automáticos.
+   */
+  private async getWithProxyRotation(
+    url: string,
+    timeoutMs = 15000,
+  ): Promise<string | null> {
+    for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
+      const proxyUrl = this.nextProxy();
+      const agent = this.makeAgent(proxyUrl);
+
+      this.logger.debug(
+        `[DatosPeru] GET ${url.substring(0, 80)}... via ${proxyUrl} (intento ${attempt + 1})`,
+      );
+
+      const html = await this.httpGet(url, agent, timeoutMs);
+      if (html && html.length > 1000) {
+        return html;
+      }
+
+      this.logger.warn(
+        `[DatosPeru] Proxy ${proxyUrl} falló, rotando...`,
+      );
+    }
+
+    this.logger.error(
+      `[DatosPeru] Todos los proxies fallaron para ${url.substring(0, 80)}`,
+    );
+    return null;
+  }
+
+  // ════════════════════════════════════════════════════════
   //  HTTP — Búsqueda por RUC
   // ════════════════════════════════════════════════════════
 
@@ -78,109 +276,27 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort {
    * GET /buscador_empresas.php?buscar={ruc}
    * Retorna el path relativo de la empresa (ej: "empresa-banco-de-credito-del-peru-20100047218.php")
    */
-  private searchByRuc(ruc: string): Promise<string | null> {
-    return new Promise((resolve) => {
-      const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-      const url = `${BASE_URL}${SEARCH_PATH}?buscar=${encodeURIComponent(ruc)}`;
+  private async searchByRuc(ruc: string): Promise<string | null> {
+    const url = `${BASE_URL}${SEARCH_PATH}?buscar=${encodeURIComponent(ruc)}`;
+    const html = await this.getWithProxyRotation(url);
+    if (!html) return null;
 
-      const req = https.request(
-        url,
-        {
-          method: 'GET',
-          headers: {
-            'User-Agent': ua,
-            Accept: 'text/html,application/xhtml+xml',
-            'Accept-Language': 'es-PE,es;q=0.9',
-          },
-        },
-        (res) => {
-          if (res.statusCode !== 200) {
-            this.logger.warn(`[DatosPeru] Search HTTP ${res.statusCode}`);
-            resolve(null);
-            return;
-          }
+    // Extraer el primer link que empiece con empresa-...{ruc}.php
+    const regex = new RegExp(`href="(empresa-[^"]*${ruc}\\.php)"`, 'i');
+    const match = html.match(regex);
+    if (match) return match[1];
 
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const html = Buffer.concat(chunks).toString('utf-8');
-            // Extraer el primer link que empiece con empresa-...{ruc}.php
-            const regex = new RegExp(
-              `href="(empresa-[^"]*${ruc}\\.php)"`,
-              'i',
-            );
-            const match = html.match(regex);
-            if (match) {
-              resolve(match[1]);
-            } else {
-              // Fallback: cualquier link de empresa
-              const fallback = html.match(/href="(empresa-[^"]+\.php)"/i);
-              resolve(fallback ? fallback[1] : null);
-            }
-          });
-        },
-      );
-
-      req.on('error', (err) => {
-        this.logger.error(`[DatosPeru] Search error: ${err.message}`);
-        resolve(null);
-      });
-
-      req.setTimeout(15000, () => {
-        req.destroy();
-        resolve(null);
-      });
-
-      req.end();
-    });
+    // Fallback: cualquier link de empresa
+    const fallback = html.match(/href="(empresa-[^"]+\.php)"/i);
+    return fallback ? fallback[1] : null;
   }
 
   // ════════════════════════════════════════════════════════
   //  HTTP — Fetch página completa
   // ════════════════════════════════════════════════════════
 
-  private fetchPage(url: string): Promise<string | null> {
-    return new Promise((resolve) => {
-      const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-
-      const req = https.request(
-        url,
-        {
-          method: 'GET',
-          headers: {
-            'User-Agent': ua,
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'es-PE,es;q=0.9,en;q=0.8',
-            Referer: `${BASE_URL}/`,
-          },
-        },
-        (res) => {
-          if (res.statusCode !== 200) {
-            this.logger.warn(`[DatosPeru] Fetch HTTP ${res.statusCode}`);
-            resolve(null);
-            return;
-          }
-
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            resolve(Buffer.concat(chunks).toString('utf-8'));
-          });
-        },
-      );
-
-      req.on('error', (err) => {
-        this.logger.error(`[DatosPeru] Fetch error: ${err.message}`);
-        resolve(null);
-      });
-
-      req.setTimeout(20000, () => {
-        req.destroy();
-        resolve(null);
-      });
-
-      req.end();
-    });
+  private async fetchPage(url: string): Promise<string | null> {
+    return this.getWithProxyRotation(url, 20000);
   }
 
   // ════════════════════════════════════════════════════════
