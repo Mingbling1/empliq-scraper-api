@@ -14,8 +14,8 @@ import {
  * FASE 1 — Búsqueda directa (web propia de la empresa):
  *   DDG HTTP → Bing HTTP
  *
- * FASE 2 — Fallback a directorios (cuando no se encuentra web propia):
- *   UniversidadPeru.com → DatosPeru.org
+ * FASE 2 — Fallback a directorio (cuando no se encuentra web propia):
+ *   UniversidadPeru.com (búsqueda directa por RUC/nombre, sin DDG/Bing)
  *
  * Si se pide una estrategia específica, la usa directamente.
  * Si falla, pasa al fallback automático.
@@ -29,13 +29,11 @@ export class SearchOrchestratorService {
     @Inject('DDG_HTTP_ADAPTER') private ddgHttp: SearchEnginePort,
     @Inject('BING_HTTP_ADAPTER') private bingHttp: SearchEnginePort,
     @Inject('UNIV_PERU_HTTP_ADAPTER') private univPeruHttp: SearchEnginePort,
-    @Inject('DATOS_PERU_HTTP_ADAPTER') private datosPeruHttp: SearchEnginePort,
   ) {
     this.adapters = new Map<SearchStrategy, SearchEnginePort>([
       [SearchStrategy.DDG_HTTP, ddgHttp],
       [SearchStrategy.BING_HTTP, bingHttp],
       [SearchStrategy.UNIV_PERU_HTTP, univPeruHttp],
-      [SearchStrategy.DATOS_PERU_HTTP, datosPeruHttp],
     ]);
   }
 
@@ -72,7 +70,7 @@ export class SearchOrchestratorService {
   /**
    * Búsqueda con fallback automático en 2 fases:
    * Fase 1: DDG → Bing (busca web propia de la empresa)
-   * Fase 2: UniversidadPeru → DatosPeru (directorios de empresas peruanas)
+   * Fase 2: UniversidadPeru.com (búsqueda directa en directorio)
    *
    * LÓGICA DE SCORE:
    *  - score >= 15 → Alta confianza, devolver inmediatamente
@@ -126,9 +124,9 @@ export class SearchOrchestratorService {
       }
     }
 
-    // ═══ FASE 2: Fallback a directorios (universidadperu.com, datosperu.org) ═══
+    // ═══ FASE 2: Fallback a directorio (universidadperu.com — búsqueda directa) ═══
     this.logger.log(
-      `🗂️ ${phase1Best ? `Mejor Phase 1 tiene score ${phase1Best.result.score} (baja confianza)` : 'No se encontró web propia'} para "${companyName}", probando directorios...`,
+      `🗂️ ${phase1Best ? `Mejor Phase 1 tiene score ${phase1Best.result.score} (baja confianza)` : 'No se encontró web propia'} para "${companyName}", probando directorio...`,
     );
 
     for (const strategy of DIRECTORY_STRATEGY_PRIORITY) {
@@ -246,7 +244,6 @@ export class SearchOrchestratorService {
       [SearchStrategy.DDG_HTTP]: { min: 2000, max: 5000 },
       [SearchStrategy.BING_HTTP]: { min: 2000, max: 5000 },
       [SearchStrategy.UNIV_PERU_HTTP]: { min: 1500, max: 3000 },
-      [SearchStrategy.DATOS_PERU_HTTP]: { min: 1500, max: 3000 },
     };
     const range = delays[strategy];
     return Math.floor(Math.random() * (range.max - range.min + 1)) + range.min;

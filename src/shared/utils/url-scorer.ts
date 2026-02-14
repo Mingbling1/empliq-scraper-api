@@ -19,7 +19,7 @@ const BLACKLIST = [
   // Noticias / prensa
   'rpp.pe', 'elcomercio.pe', 'gestion.pe', 'larepublica.pe',
   // Directorios / perfiles
-  'datosperu.org', 'universidadperu.com', 'yelp.com',
+  'universidadperu.com', 'yelp.com',
   'sunat.gob.pe', 'waze.com', 'tripadvisor.com',
   'emis.com', 'dnb.com', 'bloomberg.com', 'reuters.com',
   'crunchbase.com', 'zoominfo.com', 'empresite.com',

@@ -9,11 +9,8 @@ export enum SearchStrategy {
   /** HTTP puro a www.bing.com/search — sin navegador, ~2-4s */
   BING_HTTP = 'bing_http',
 
-  /** Fallback: busca ficha de empresa en universidadperu.com */
+  /** Fallback: búsqueda directa en universidadperu.com (POST al buscador interno) */
   UNIV_PERU_HTTP = 'univ_peru_http',
-
-  /** Fallback: busca ficha de empresa en datosperu.org */
-  DATOS_PERU_HTTP = 'datos_peru_http',
 }
 
 /** Orden de prioridad: búsqueda de web propia de la empresa */
@@ -25,5 +22,4 @@ export const STRATEGY_PRIORITY: SearchStrategy[] = [
 /** Fallback: directorios de empresas peruanas (cuando no se encuentra web propia) */
 export const DIRECTORY_STRATEGY_PRIORITY: SearchStrategy[] = [
   SearchStrategy.UNIV_PERU_HTTP,
-  SearchStrategy.DATOS_PERU_HTTP,
 ];

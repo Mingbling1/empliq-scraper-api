@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as https from 'https';
+import * as http from 'http';
+import * as querystring from 'querystring';
 import { SearchEnginePort } from '../../domain/ports/search-engine.port';
 import { SearchResult, SearchResultItem } from '../../domain/entities/search-result.entity';
 import { StrategyStatus } from '../../domain/entities/strategy-status.entity';
@@ -12,13 +14,19 @@ import {
 } from '../../shared/utils/company-name-cleaner';
 
 const TARGET_DOMAIN = 'universidadperu.com';
+const SEARCH_PATH = '/empresas/busqueda/';
 
 /**
- * Adaptador de búsqueda en UniversidadPeru.com (directorio de empresas).
+ * Adaptador de búsqueda DIRECTA en UniversidadPeru.com (directorio de empresas).
  *
- * Se usa como FALLBACK cuando DDG y Bing no encuentran la web propia de la empresa.
- * Busca la ficha de la empresa en universidadperu.com/empresas/{slug}.php
- * usando DDG HTML (primario) o Bing HTML (secundario) como motor de búsqueda.
+ * Usa el buscador interno de universidadperu.com:
+ *   POST https://www.universidadperu.com/empresas/busqueda/
+ *   body: buscaempresa={RUC o Razón Social}
+ *
+ * La respuesta es la página de la empresa directamente.
+ * Se extrae la URL canónica del <link rel="canonical"> en el HTML.
+ *
+ * NO usa DuckDuckGo ni Bing — búsqueda directa en el directorio.
  */
 @Injectable()
 export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDestroy {
@@ -47,87 +55,81 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
     const cleanName = cleanCompanyName(companyName);
     const variants = generateSearchVariants(companyName);
 
-    // Queries optimizadas para encontrar la ficha en universidadperu.com
-    // PRIORIDAD 1: Búsqueda por RUC (más confiable — URLs contienen el RUC)
-    // ej: universidadperu.com/empresas/nombre-slug-20165465009.php
-    const queries: string[] = [];
+    this.logger.log(
+      `[UnivPeru] Búsqueda directa: "${companyName}" → "${cleanName}" (RUC: ${ruc || 'N/A'})`,
+    );
 
-    if (ruc) {
-      queries.push(`${ruc} site:${TARGET_DOMAIN}`);
-      queries.push(`${ruc} universidad peru`);
-    }
+    // Términos de búsqueda: primero RUC (más confiable), luego nombre
+    const searchTerms: string[] = [];
+    if (ruc) searchTerms.push(ruc);
+    searchTerms.push(cleanName);
 
-    // PRIORIDAD 2: Búsqueda por nombre
-    queries.push(`${cleanName} universidad peru`);
-    queries.push(`"${cleanName}" site:${TARGET_DOMAIN}`);
-
+    // También intentar con variantes cortas
     for (const variant of variants) {
       if (variant !== cleanName && variant.length >= 3) {
-        queries.push(`"${variant}" site:${TARGET_DOMAIN}`);
+        searchTerms.push(variant);
       }
     }
 
-    this.logger.log(`[UnivPeru] Buscando directorio: "${companyName}" → "${cleanName}"`);
-
     try {
-      let bestUrl: string | null = null;
-      let bestTitle = '';
-      let bestScore = 0;
-      const allFound: SearchResultItem[] = [];
-
-      for (let i = 0; i < Math.min(queries.length, 4); i++) {
-        const query = queries[i];
-        this.logger.log(`[UnivPeru] Query ${i + 1}: ${query}`);
+      for (let i = 0; i < Math.min(searchTerms.length, 3); i++) {
+        const term = searchTerms[i];
+        this.logger.log(`[UnivPeru] Intento ${i + 1}: "${term}"`);
 
         if (i > 0) await this.sleep(1500);
 
-        // DDG primero, Bing como respaldo
-        let results = await this.fetchDDG(query);
+        const html = await this.postSearch(term);
 
-        if (results.length === 0) {
-          this.logger.log(`[UnivPeru] DDG sin resultados, intentando Bing...`);
-          await this.sleep(1000);
-          results = await this.fetchBing(query);
+        if (!html) {
+          this.logger.warn(`[UnivPeru] Sin respuesta para "${term}"`);
+          continue;
         }
 
-        for (const r of results) {
-          if (!this.isTargetUrl(r.url)) continue;
-          const score = this.scoreDirectoryResult(r.url, r.title, companyName, variants);
-          allFound.push(new SearchResultItem(r.url, r.title, score));
+        // Extraer URL canónica del HTML
+        const canonicalUrl = this.extractCanonicalUrl(html);
 
-          if (score > bestScore) {
-            bestUrl = r.url;
-            bestTitle = r.title;
-            bestScore = score;
-          }
+        if (!canonicalUrl || !this.isValidCompanyPage(canonicalUrl)) {
+          this.logger.log(
+            `[UnivPeru] No se encontró página de empresa para "${term}" (canonical: ${canonicalUrl || 'null'})`,
+          );
+          continue;
         }
 
-        if (bestScore >= 15) {
-          this.logger.log(`[UnivPeru] Score ${bestScore} >= 15, suficiente`);
-          break;
-        }
+        // Extraer título de la página
+        const title = this.extractTitle(html);
+
+        // Calcular score
+        const score = this.scoreDirectoryResult(
+          canonicalUrl,
+          title,
+          companyName,
+          variants,
+        );
+
+        const elapsed = Date.now() - startTime;
+        this.status.recordUse(true, elapsed);
+
+        const allResults = [new SearchResultItem(canonicalUrl, title, score)];
+
+        this.logger.log(
+          `[UnivPeru] ✅ ${canonicalUrl} (score: ${score}, ${elapsed}ms, título: "${title}")`,
+        );
+
+        return new SearchResult({
+          company: companyName,
+          cleanName,
+          website: canonicalUrl,
+          score,
+          title,
+          strategy: this.strategy,
+          allResults,
+        });
       }
 
       const elapsed = Date.now() - startTime;
-
-      if (!bestUrl || bestScore < 8) {
-        this.status.recordUse(false, elapsed);
-        this.logger.warn(`[UnivPeru] No encontrado para "${companyName}" (${elapsed}ms)`);
-        return null;
-      }
-
-      this.status.recordUse(true, elapsed);
-      this.logger.log(`[UnivPeru] ✅ ${bestUrl} (score: ${bestScore}, ${elapsed}ms)`);
-
-      return new SearchResult({
-        company: companyName,
-        cleanName,
-        website: bestUrl,
-        score: bestScore,
-        title: bestTitle,
-        strategy: this.strategy,
-        allResults: allFound.sort((a, b) => b.score - a.score).slice(0, 5),
-      });
+      this.status.recordUse(false, elapsed);
+      this.logger.warn(`[UnivPeru] No encontrado para "${companyName}" (${elapsed}ms)`);
+      return null;
     } catch (error) {
       const elapsed = Date.now() - startTime;
       this.status.recordUse(false, elapsed);
@@ -153,17 +155,227 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
   }
 
   // ════════════════════════════════════════════════════════
+  // HTTP SEARCH (POST directo a universidadperu.com)
+  // ════════════════════════════════════════════════════════
+
+  /**
+   * POST al buscador interno de universidadperu.com.
+   * Envía el RUC o nombre en el campo "buscaempresa".
+   * Retorna el HTML de la respuesta (que es la página de la empresa directamente).
+   */
+  private postSearch(searchTerm: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const postData = querystring.stringify({ buscaempresa: searchTerm });
+      const ua = this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
+
+      const options: https.RequestOptions = {
+        hostname: `www.${TARGET_DOMAIN}`,
+        path: SEARCH_PATH,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+          'User-Agent': ua,
+          Accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'es-PE,es;q=0.9,en;q=0.8',
+          Referer: `https://www.${TARGET_DOMAIN}/empresas/`,
+          Origin: `https://www.${TARGET_DOMAIN}`,
+        },
+      };
+
+      const req = https.request(options, (res) => {
+        // Manejar redirecciones (301, 302, 303)
+        if (
+          res.statusCode &&
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location
+        ) {
+          this.logger.log(`[UnivPeru] Redirect → ${res.headers.location}`);
+          this.followRedirect(res.headers.location, ua)
+            .then(resolve)
+            .catch(() => resolve(null));
+          return;
+        }
+
+        if (res.statusCode !== 200) {
+          this.logger.warn(`[UnivPeru] HTTP ${res.statusCode}`);
+          resolve(null);
+          return;
+        }
+
+        let data = '';
+        res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+        res.on('end', () => resolve(data));
+      });
+
+      req.on('error', (err) => {
+        this.logger.error(`[UnivPeru] Request error: ${err.message}`);
+        resolve(null);
+      });
+
+      req.setTimeout(15000, () => {
+        req.destroy();
+        resolve(null);
+      });
+
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  /**
+   * Sigue una redirección HTTP.
+   */
+  private followRedirect(
+    location: string,
+    ua: string,
+  ): Promise<string | null> {
+    return new Promise((resolve) => {
+      try {
+        const redirectUrl = new URL(
+          location,
+          `https://www.${TARGET_DOMAIN}`,
+        );
+
+        const isHttps = redirectUrl.protocol === 'https:';
+        const httpModule = isHttps ? https : http;
+
+        const req = httpModule.request(
+          {
+            hostname: redirectUrl.hostname,
+            path: redirectUrl.pathname + redirectUrl.search,
+            method: 'GET',
+            headers: {
+              'User-Agent': ua,
+              Accept: 'text/html,application/xhtml+xml',
+              'Accept-Language': 'es-PE,es;q=0.9',
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+            res.on('end', () => resolve(data));
+          },
+        );
+
+        req.on('error', () => resolve(null));
+        req.setTimeout(10000, () => {
+          req.destroy();
+          resolve(null);
+        });
+        req.end();
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  // ════════════════════════════════════════════════════════
+  // HTML PARSING
+  // ════════════════════════════════════════════════════════
+
+  /**
+   * Extrae la URL canónica del HTML (<link rel="canonical" href="...">).
+   * Esta URL indica la ficha de la empresa en universidadperu.com.
+   */
+  private extractCanonicalUrl(html: string): string | null {
+    // <link rel="canonical" href="https://www.universidadperu.com/empresas/policia-nacional-peru.php">
+    const canonicalMatch = html.match(
+      /<link\s+rel="canonical"\s+href="(https?:\/\/[^"]+)"/i,
+    );
+
+    if (canonicalMatch) {
+      return canonicalMatch[1];
+    }
+
+    // Fallback: <meta property="og:url" content="...">
+    const ogUrlMatch = html.match(
+      /<meta\s+property="og:url"\s+content="(https?:\/\/[^"]+)"/i,
+    );
+
+    if (ogUrlMatch) {
+      return ogUrlMatch[1];
+    }
+
+    // Fallback: <link rel="alternate" ... href="...empresas/...">
+    const alternateMatch = html.match(
+      /<link\s+rel="alternate"[^>]+href="(https?:\/\/[^"]*universidadperu\.com\/empresas\/[^"]+\.php)"/i,
+    );
+
+    if (alternateMatch) {
+      return alternateMatch[1].replace(
+        'm.universidadperu.com',
+        'www.universidadperu.com',
+      );
+    }
+
+    return null;
+  }
+
+  /**
+   * Extrae el título de la empresa del HTML.
+   */
+  private extractTitle(html: string): string {
+    // Intentar <h1>
+    const h1Match = html.match(/<h1[^>]*>([^<]+)/i);
+    if (h1Match) {
+      const title = h1Match[1].trim();
+      // Ignorar títulos genéricos
+      if (
+        title &&
+        !title.toLowerCase().includes('universidad peru') &&
+        !title.toLowerCase().includes('portal de estudios') &&
+        !title.toLowerCase().includes('desconocida')
+      ) {
+        return title;
+      }
+    }
+
+    // Fallback: og:title
+    const ogTitleMatch = html.match(
+      /<meta\s+property="og:title"\s+content="([^"]+)"/i,
+    );
+    if (ogTitleMatch) {
+      const ogTitle = ogTitleMatch[1].trim();
+      if (
+        !ogTitle.toLowerCase().includes('universidad peru') &&
+        !ogTitle.toLowerCase().includes('portal de estudios')
+      ) {
+        return ogTitle;
+      }
+    }
+
+    return '';
+  }
+
+  // ════════════════════════════════════════════════════════
   // URL VALIDATION & SCORING
   // ════════════════════════════════════════════════════════
 
   /**
-   * Solo acepta URLs de universidadperu.com/empresas/
+   * Verifica que la URL sea una página válida de empresa en universidadperu.com
+   * y NO la homepage, búsqueda ni página "desconocida".
    */
-  private isTargetUrl(url: string): boolean {
+  private isValidCompanyPage(url: string): boolean {
     try {
       const parsed = new URL(url);
       const host = parsed.hostname.toLowerCase();
-      return host.includes(TARGET_DOMAIN) && parsed.pathname.includes('/empresas/');
+      const path = parsed.pathname.toLowerCase();
+
+      if (!host.includes(TARGET_DOMAIN)) return false;
+
+      // Debe estar en /empresas/ y terminar en .php
+      if (!path.startsWith('/empresas/') || !path.endsWith('.php')) return false;
+
+      // Rechazar la raíz del directorio
+      if (path === '/empresas/' || path === '/empresas/index.php') return false;
+
+      // Rechazar la página de búsqueda
+      if (path.includes('/busqueda')) return false;
+
+      return true;
     } catch {
       return false;
     }
@@ -171,8 +383,8 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
 
   /**
    * Scoring para páginas de directorio.
-   * Base de 10 por encontrar una ficha válida del directorio.
-   * Bonus por coincidencia de nombre en el slug de la URL y en el título.
+   * Base de 10 por encontrar una ficha válida de empresa.
+   * Bonus por coincidencia de nombre en slug y título.
    */
   private scoreDirectoryResult(
     url: string,
@@ -180,13 +392,13 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
     companyName: string,
     variants: string[],
   ): number {
-    let score = 10; // Base: encontrar una ficha válida de empresa
+    let score = 10; // Base: ficha de empresa encontrada
     const words = getCompanyWords(companyName);
 
     try {
       const slug = new URL(url).pathname.toLowerCase();
 
-      // Bonus por palabras del nombre en el slug de la URL
+      // Bonus por palabras del nombre en el slug
       for (const w of words) {
         if (w.length > 3 && slug.includes(w)) score += 5;
       }
@@ -199,7 +411,7 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
       /* URL inválida */
     }
 
-    // Bonus por coincidencia en el título del resultado
+    // Bonus por coincidencia en el título
     if (title) {
       const t = title.toLowerCase();
       for (const w of words) {
@@ -208,170 +420,6 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
     }
 
     return score;
-  }
-
-  // ════════════════════════════════════════════════════════
-  // DDG HTTP
-  // ════════════════════════════════════════════════════════
-
-  private fetchDDG(query: string): Promise<Array<{ url: string; title: string }>> {
-    return new Promise((resolve) => {
-      const postData = `q=${encodeURIComponent(query)}`;
-      const ua = this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
-
-      const req = https.request(
-        {
-          hostname: 'html.duckduckgo.com',
-          path: '/html/',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Content-Length': Buffer.byteLength(postData),
-            'User-Agent': ua,
-            Accept: 'text/html,application/xhtml+xml',
-            'Accept-Language': 'es-PE,es;q=0.9',
-            Referer: 'https://duckduckgo.com/',
-          },
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk) => (data += chunk));
-          res.on('end', () => resolve(this.parseDDGHTML(data)));
-        },
-      );
-
-      req.on('error', () => resolve([]));
-      req.setTimeout(10000, () => {
-        req.destroy();
-        resolve([]);
-      });
-      req.write(postData);
-      req.end();
-    });
-  }
-
-  private parseDDGHTML(html: string): Array<{ url: string; title: string }> {
-    const results: Array<{ url: string; title: string }> = [];
-    const pattern =
-      /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-    let match: RegExpExecArray | null;
-
-    while ((match = pattern.exec(html)) !== null) {
-      let url = match[1];
-      const title = match[2].replace(/<[^>]*>/g, '').trim();
-
-      if (url.includes('uddg=')) {
-        try {
-          const parsed = new URL(url, 'https://duckduckgo.com');
-          const uddg = parsed.searchParams.get('uddg');
-          if (uddg) url = uddg;
-        } catch {
-          /* ignorar */
-        }
-      }
-
-      try {
-        url = decodeURIComponent(url);
-      } catch {
-        /* ignorar */
-      }
-
-      if (url.startsWith('http')) {
-        results.push({ url, title });
-      }
-    }
-
-    return results;
-  }
-
-  // ════════════════════════════════════════════════════════
-  // BING HTTP
-  // ════════════════════════════════════════════════════════
-
-  private fetchBing(query: string): Promise<Array<{ url: string; title: string }>> {
-    return new Promise((resolve) => {
-      const searchPath = `/search?q=${encodeURIComponent(query)}&setlang=es&cc=PE`;
-      const ua = this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
-
-      const options: https.RequestOptions = {
-        hostname: 'www.bing.com',
-        path: searchPath,
-        method: 'GET',
-        headers: {
-          'User-Agent': ua,
-          Accept: 'text/html,application/xhtml+xml',
-          'Accept-Language': 'es-PE,es;q=0.9',
-          'Accept-Encoding': 'identity',
-        },
-      };
-
-      const req = https.request(options, (res) => {
-        if (
-          res.statusCode &&
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          const redir = new URL(res.headers.location, 'https://www.bing.com');
-          const req2 = https.request(
-            {
-              hostname: redir.hostname,
-              path: redir.pathname + redir.search,
-              method: 'GET',
-              headers: {
-                'User-Agent': ua,
-                Accept: 'text/html',
-                'Accept-Encoding': 'identity',
-              },
-            },
-            (res2) => {
-              let data = '';
-              res2.on('data', (chunk) => (data += chunk));
-              res2.on('end', () => resolve(this.parseBingHTML(data)));
-            },
-          );
-          req2.on('error', () => resolve([]));
-          req2.setTimeout(10000, () => {
-            req2.destroy();
-            resolve([]);
-          });
-          req2.end();
-          return;
-        }
-
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve(this.parseBingHTML(data)));
-      });
-
-      req.on('error', () => resolve([]));
-      req.setTimeout(10000, () => {
-        req.destroy();
-        resolve([]);
-      });
-      req.end();
-    });
-  }
-
-  private parseBingHTML(html: string): Array<{ url: string; title: string }> {
-    const results: Array<{ url: string; title: string }> = [];
-    const pattern = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
-    let match: RegExpExecArray | null;
-
-    while ((match = pattern.exec(html)) !== null) {
-      const linkMatch =
-        /<h2[^>]*>\s*<a[^>]*href="(https?:\/\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(
-          match[1],
-        );
-      if (linkMatch) {
-        results.push({
-          url: linkMatch[1],
-          title: linkMatch[2].replace(/<[^>]*>/g, '').trim(),
-        });
-      }
-    }
-
-    return results;
   }
 
   // ════════════════════════════════════════════════════════

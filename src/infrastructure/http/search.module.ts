@@ -7,7 +7,6 @@ import { CompanyProfileService } from '../../application/services/company-profil
 import { DdgHttpAdapter } from '../adapters/ddg-http.adapter';
 import { BingHttpAdapter } from '../adapters/bing-http.adapter';
 import { UniversidadPeruHttpAdapter } from '../adapters/universidad-peru-http.adapter';
-import { DatosPeruHttpAdapter } from '../adapters/datos-peru-http.adapter';
 import { CheerioScraperAdapter } from '../adapters/cheerio-scraper.adapter';
 import { WEBSITE_SCRAPER_PORT } from '../../domain/ports/website-scraper.port';
 
@@ -24,14 +23,10 @@ import { WEBSITE_SCRAPER_PORT } from '../../domain/ports/website-scraper.port';
       provide: 'BING_HTTP_ADAPTER',
       useClass: BingHttpAdapter,
     },
-    // Adaptadores de fallback — directorios de empresas peruanas
+    // Adaptador de fallback — directorio universidadperu.com (búsqueda directa)
     {
       provide: 'UNIV_PERU_HTTP_ADAPTER',
       useClass: UniversidadPeruHttpAdapter,
-    },
-    {
-      provide: 'DATOS_PERU_HTTP_ADAPTER',
-      useClass: DatosPeruHttpAdapter,
     },
     // Adaptador de scraping (implementa WebsiteScraperPort) — Cheerio, sin browser
     {

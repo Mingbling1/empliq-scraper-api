@@ -9,7 +9,6 @@ export const scraperConfig = registerAs('scraper', () => ({
     ddgHttp: parseInt(process.env.DDG_HTTP_MAX || '200', 10),
     bingHttp: parseInt(process.env.BING_HTTP_MAX || '150', 10),
     univPeruHttp: parseInt(process.env.UNIV_PERU_HTTP_MAX || '100', 10),
-    datosPeruHttp: parseInt(process.env.DATOS_PERU_HTTP_MAX || '100', 10),
   },
 
   /** Delays entre búsquedas (ms) */
