@@ -205,9 +205,13 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
           return;
         }
 
-        let data = '';
-        res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-        res.on('end', () => resolve(data));
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          const decoder = new TextDecoder('windows-1252');
+          resolve(decoder.decode(buffer));
+        });
       });
 
       req.on('error', (err) => {
@@ -254,9 +258,13 @@ export class UniversidadPeruHttpAdapter implements SearchEnginePort, OnModuleDes
             },
           },
           (res) => {
-            let data = '';
-            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-            res.on('end', () => resolve(data));
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('end', () => {
+              const buffer = Buffer.concat(chunks);
+              const decoder = new TextDecoder('windows-1252');
+              resolve(decoder.decode(buffer));
+            });
           },
         );
 
