@@ -73,12 +73,23 @@ export class SearchOrchestratorService {
    * Búsqueda con fallback automático en 2 fases:
    * Fase 1: DDG → Bing (busca web propia de la empresa)
    * Fase 2: UniversidadPeru → DatosPeru (directorios de empresas peruanas)
+   *
+   * LÓGICA DE SCORE:
+   *  - score >= 15 → Alta confianza, devolver inmediatamente
+   *  - score 8-14  → Baja confianza, guardar como candidato y probar directorios
+   *  - score < 8   → No encontrado (found=false), seguir buscando
+   *
+   * Al final: devolver el resultado con mayor score entre Phase 1 y Phase 2.
    */
   private async searchWithFallback(
     companyName: string,
     ruc?: string,
     skipStrategy?: SearchStrategy,
   ): Promise<{ result: SearchResult | null; strategyUsed: SearchStrategy }> {
+    // Mejor candidato de Phase 1 (puede tener score bajo)
+    let phase1Best: { result: SearchResult; strategyUsed: SearchStrategy } | null =
+      null;
+
     // ═══ FASE 1: Búsqueda directa (web propia de la empresa) ═══
     for (const strategy of STRATEGY_PRIORITY) {
       if (strategy === skipStrategy) continue;
@@ -94,33 +105,30 @@ export class SearchOrchestratorService {
 
       if (result && result.found) {
         if (result.score >= 15) {
+          // ✅ Alta confianza → devolver inmediatamente, no necesita directorio
+          this.logger.log(
+            `✅ ${strategy} encontró con alta confianza: ${result.website} (score: ${result.score})`,
+          );
           return { result, strategyUsed: strategy };
         }
-        this.logger.log(
-          `${strategy} encontró resultado con score bajo (${result.score}), probando siguiente...`,
-        );
-        const fallbackResult = await this.tryRemainingStrategies(
-          companyName,
-          ruc,
-          strategy,
-          STRATEGY_PRIORITY,
-        );
-        if (
-          fallbackResult &&
-          fallbackResult.result &&
-          fallbackResult.result.score > result.score
-        ) {
-          return fallbackResult;
-        }
-        return { result, strategyUsed: strategy };
-      }
 
-      this.logger.log(`${strategy} no encontró resultado, probando siguiente...`);
+        // Score bajo (8-14) → guardar como candidato, seguir buscando
+        this.logger.log(
+          `${strategy} encontró con score bajo (${result.score}): ${result.website}, guardando como candidato...`,
+        );
+        if (!phase1Best || result.score > phase1Best.result.score) {
+          phase1Best = { result, strategyUsed: strategy };
+        }
+      } else {
+        this.logger.log(
+          `${strategy} no encontró resultado, probando siguiente...`,
+        );
+      }
     }
 
     // ═══ FASE 2: Fallback a directorios (universidadperu.com, datosperu.org) ═══
     this.logger.log(
-      `🗂️ No se encontró web propia para "${companyName}", intentando directorios...`,
+      `🗂️ ${phase1Best ? `Mejor Phase 1 tiene score ${phase1Best.result.score} (baja confianza)` : 'No se encontró web propia'} para "${companyName}", probando directorios...`,
     );
 
     for (const strategy of DIRECTORY_STRATEGY_PRIORITY) {
@@ -137,44 +145,32 @@ export class SearchOrchestratorService {
         this.logger.log(
           `✅ Directorio ${strategy} encontró: ${result.website} (score: ${result.score})`,
         );
+        // Si el directorio encontró algo, comparar con Phase 1 candidate
+        if (phase1Best && phase1Best.result.score > result.score) {
+          this.logger.log(
+            `Phase 1 tiene mejor score (${phase1Best.result.score} > ${result.score}), usando Phase 1`,
+          );
+          return phase1Best;
+        }
         return { result, strategyUsed: strategy };
       }
 
       this.logger.log(`Directorio ${strategy} no encontró resultado...`);
     }
 
-    // Ninguna estrategia (ni directorio) encontró resultado
+    // Si tenemos un candidato de Phase 1 (aunque con score bajo), devolverlo
+    if (phase1Best) {
+      this.logger.log(
+        `⚠️ Usando candidato Phase 1 de baja confianza: ${phase1Best.result.website} (score: ${phase1Best.result.score})`,
+      );
+      return phase1Best;
+    }
+
+    // Ninguna estrategia encontró resultado
     const lastStrategy =
       DIRECTORY_STRATEGY_PRIORITY[DIRECTORY_STRATEGY_PRIORITY.length - 1] ||
       STRATEGY_PRIORITY[STRATEGY_PRIORITY.length - 1];
     return { result: null, strategyUsed: lastStrategy };
-  }
-
-  /**
-   * Intenta las estrategias restantes después de la actual (dentro de la misma fase).
-   */
-  private async tryRemainingStrategies(
-    companyName: string,
-    ruc: string | undefined,
-    currentStrategy: SearchStrategy,
-    priorities: readonly SearchStrategy[],
-  ): Promise<{
-    result: SearchResult | null;
-    strategyUsed: SearchStrategy;
-  } | null> {
-    const currentIndex = priorities.indexOf(currentStrategy);
-    for (let i = currentIndex + 1; i < priorities.length; i++) {
-      const strategy = priorities[i];
-      const adapter = this.adapters.get(strategy);
-      if (!adapter || !adapter.isAvailable()) continue;
-
-      this.logger.log(`[Fallback] Intentando ${strategy} para mejorar score...`);
-      const result = await adapter.search(companyName, ruc);
-      if (result && result.found) {
-        return { result, strategyUsed: strategy };
-      }
-    }
-    return null;
   }
 
   /**
