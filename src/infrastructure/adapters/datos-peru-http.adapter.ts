@@ -142,8 +142,8 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         const proxyUrl = `socks5h://${line}`;
         try {
           const agent = this.makeAgent(proxyUrl);
-          const html = await this.httpGet(testUrl, agent, 8000);
-          if (html && html.length > 5000 && html.includes('datosperu')) {
+          const result = await this.httpGet(testUrl, agent, 8000);
+          if (result.html && result.html.length > 5000 && result.html.includes('datosperu')) {
             working.push(proxyUrl);
           }
         } catch {
@@ -199,7 +199,7 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     url: string,
     agent: SocksProxyAgent,
     timeoutMs = 15000,
-  ): Promise<string | null> {
+  ): Promise<{ html: string | null; status: number; size: number; error?: string }> {
     return new Promise((resolve) => {
       const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
       const req = https.request(
@@ -216,22 +216,24 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
           },
         },
         (res) => {
-          if (res.statusCode !== 200) {
-            res.resume(); // drain
-            resolve(null);
-            return;
-          }
           const chunks: Buffer[] = [];
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () =>
-            resolve(Buffer.concat(chunks).toString('utf-8')),
-          );
+          res.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf-8');
+            resolve({
+              html: res.statusCode === 200 ? body : null,
+              status: res.statusCode ?? 0,
+              size: body.length,
+            });
+          });
         },
       );
-      req.on('error', () => resolve(null));
+      req.on('error', (err) =>
+        resolve({ html: null, status: 0, size: 0, error: err.message }),
+      );
       req.setTimeout(timeoutMs, () => {
         req.destroy();
-        resolve(null);
+        resolve({ html: null, status: 0, size: 0, error: 'timeout' });
       });
       req.end();
     });
@@ -252,13 +254,17 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         `[DatosPeru] GET ${url.substring(0, 80)}... via ${proxyUrl} (intento ${attempt + 1})`,
       );
 
-      const html = await this.httpGet(url, agent, timeoutMs);
-      if (html && html.length > 1000) {
-        return html;
+      const result = await this.httpGet(url, agent, timeoutMs);
+
+      if (result.html && result.html.length > 1000) {
+        this.logger.log(
+          `[DatosPeru] ✅ Proxy ${proxyUrl} OK (HTTP:${result.status}, ${result.size} bytes)`,
+        );
+        return result.html;
       }
 
       this.logger.warn(
-        `[DatosPeru] Proxy ${proxyUrl} falló, rotando...`,
+        `[DatosPeru] Proxy ${proxyUrl} falló: HTTP:${result.status} SIZE:${result.size}${result.error ? ' ERR:' + result.error : ''} — rotando...`,
       );
     }
 
