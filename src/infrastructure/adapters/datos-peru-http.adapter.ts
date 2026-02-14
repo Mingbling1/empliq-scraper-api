@@ -24,6 +24,25 @@ const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
+/** Cipher suites que imitan a Chrome 120 para bypass JA3 fingerprint */
+const CHROME_CIPHERS = [
+  'TLS_AES_128_GCM_SHA256',
+  'TLS_AES_256_GCM_SHA384',
+  'TLS_CHACHA20_POLY1305_SHA256',
+  'ECDHE-ECDSA-AES128-GCM-SHA256',
+  'ECDHE-RSA-AES128-GCM-SHA256',
+  'ECDHE-ECDSA-AES256-GCM-SHA384',
+  'ECDHE-RSA-AES256-GCM-SHA384',
+  'ECDHE-ECDSA-CHACHA20-POLY1305',
+  'ECDHE-RSA-CHACHA20-POLY1305',
+  'ECDHE-RSA-AES128-SHA',
+  'ECDHE-RSA-AES256-SHA',
+  'AES128-GCM-SHA256',
+  'AES256-GCM-SHA384',
+  'AES128-SHA',
+  'AES256-SHA',
+].join(':');
+
 /** SOCKS5 proxies comprobados que pasan Cloudflare */
 const SEED_PROXIES: string[] = [
   'socks5h://192.111.134.10:4145',
@@ -142,8 +161,8 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         const proxyUrl = `socks5h://${line}`;
         try {
           const agent = this.makeAgent(proxyUrl);
-          const html = await this.httpGet(testUrl, agent, 8000);
-          if (html && html.length > 5000 && html.includes('datosperu')) {
+          const result = await this.httpGet(testUrl, agent, 8000);
+          if (result.html && result.html.length > 5000 && result.html.includes('datosperu')) {
             working.push(proxyUrl);
           }
         } catch {
@@ -199,7 +218,7 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     url: string,
     agent: SocksProxyAgent,
     timeoutMs = 15000,
-  ): Promise<string | null> {
+  ): Promise<{ html: string | null; status: number; size: number; error?: string }> {
     return new Promise((resolve) => {
       const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
       const req = https.request(
@@ -207,31 +226,48 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         {
           method: 'GET',
           agent,
+          rejectUnauthorized: false,
+          ciphers: CHROME_CIPHERS,
+          ecdhCurve: 'X25519:prime256v1:secp384r1',
+          minVersion: 'TLSv1.2' as any,
           headers: {
             'User-Agent': ua,
             Accept:
-              'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'es-PE,es;q=0.9,en;q=0.8',
-            Referer: `${BASE_URL}/`,
+              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'es-PE,es;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+            Connection: 'keep-alive',
           },
         },
         (res) => {
-          if (res.statusCode !== 200) {
-            res.resume(); // drain
-            resolve(null);
-            return;
-          }
           const chunks: Buffer[] = [];
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () =>
-            resolve(Buffer.concat(chunks).toString('utf-8')),
-          );
+          res.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf-8');
+            resolve({
+              html: res.statusCode === 200 ? body : null,
+              status: res.statusCode ?? 0,
+              size: body.length,
+            });
+          });
         },
       );
-      req.on('error', () => resolve(null));
+      req.on('error', (err) =>
+        resolve({ html: null, status: 0, size: 0, error: err.message }),
+      );
       req.setTimeout(timeoutMs, () => {
         req.destroy();
-        resolve(null);
+        resolve({ html: null, status: 0, size: 0, error: 'timeout' });
       });
       req.end();
     });
@@ -239,6 +275,7 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
 
   /**
    * GET con rotación de proxies y reintentos automáticos.
+   * Node.js primero, luego curl como fallback.
    */
   private async getWithProxyRotation(
     url: string,
@@ -252,20 +289,60 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         `[DatosPeru] GET ${url.substring(0, 80)}... via ${proxyUrl} (intento ${attempt + 1})`,
       );
 
-      const html = await this.httpGet(url, agent, timeoutMs);
-      if (html && html.length > 1000) {
-        return html;
+      const result = await this.httpGet(url, agent, timeoutMs);
+
+      if (result.html && result.html.length > 1000) {
+        this.logger.log(
+          `[DatosPeru] ✅ Proxy ${proxyUrl} OK (HTTP:${result.status}, ${result.size} bytes)`,
+        );
+        return result.html;
       }
 
       this.logger.warn(
-        `[DatosPeru] Proxy ${proxyUrl} falló, rotando...`,
+        `[DatosPeru] Proxy ${proxyUrl} falló: HTTP:${result.status} SIZE:${result.size}${result.error ? ' ERR:' + result.error : ''} — rotando...`,
       );
     }
 
     this.logger.error(
-      `[DatosPeru] Todos los proxies fallaron para ${url.substring(0, 80)}`,
+      `[DatosPeru] Todos los proxies Node.js fallaron, intentando curl...`,
     );
-    return null;
+
+    // Fallback: intentar con curl (diferente TLS fingerprint)
+    return this.curlGet(url, timeoutMs);
+  }
+
+  /**
+   * Fallback: ejecutar curl desde shell (diferente TLS fingerprint que Node.js).
+   */
+  private curlGet(url: string, timeoutMs = 15000): Promise<string | null> {
+    return new Promise((resolve) => {
+      const { execFile } = require('child_process');
+      const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+      const proxyUrl = this.proxies[this.proxyIdx % this.proxies.length]
+        .replace('socks5h://', '');
+
+      const args = [
+        '-s', '-L', '-k',
+        '--max-time', String(Math.floor(timeoutMs / 1000)),
+        '--socks5-hostname', proxyUrl,
+        '-H', `User-Agent: ${ua}`,
+        '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        '-H', 'Accept-Language: es-PE,es;q=0.9',
+        url,
+      ];
+
+      execFile('curl', args, { maxBuffer: 1024 * 1024 }, (err: any, stdout: string) => {
+        if (err || !stdout || stdout.length < 1000) {
+          this.logger.warn(
+            `[DatosPeru] curl fallback falló: ${err?.message || 'empty'} (${stdout?.length || 0} bytes)`,
+          );
+          resolve(null);
+        } else {
+          this.logger.log(`[DatosPeru] ✅ curl OK (${stdout.length} bytes)`);
+          resolve(stdout);
+        }
+      });
+    });
   }
 
   // ════════════════════════════════════════════════════════
