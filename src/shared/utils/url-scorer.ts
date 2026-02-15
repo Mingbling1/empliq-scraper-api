@@ -43,6 +43,10 @@ const BLACKLIST = [
   'cylex.com.pe', 'cylex.com', 'cylex.es',
   'tuugo.com.pe', 'tuugo.com', 'hotfrog.com.pe',
   'infoisinfo.com.pe', 'perucontable.com',
+  // Agregadores de datos empresariales (contienen info de empresas pero NO son la web oficial)
+  'datosperu.org', 'indexbox.io', 'empresas.peru.com',
+  'ruc.com.pe', 'consultaruc.com', 'buscaruc.com',
+  'peru-empresas.com', 'perudata.com',
 ];
 
 /**
