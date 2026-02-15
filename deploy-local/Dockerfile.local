@@ -1,7 +1,10 @@
 # ─────────────────────────────────────────────────────
-# Empliq Scraper API - Production Dockerfile
-# Alpine = curl 8.x + OpenSSL 3.5 (bypasses Cloudflare TLS fingerprinting)
-# Multi-arch: funciona en ARM64 (Oracle Cloud) y x86_64 (local)
+# Empliq Scraper API - LOCAL Dockerfile
+# Usa Alpine para tener curl 8.x moderno que pasa
+# el TLS fingerprinting de Cloudflare (datosperu.org)
+#
+# Debian bookworm = curl 7.88 → BLOQUEADO
+# Alpine 3.21    = curl 8.12 → PASA ✅
 # ─────────────────────────────────────────────────────
 
 # ─── Stage 1: Builder ─────────────────────────────────
@@ -11,6 +14,7 @@ WORKDIR /app
 
 COPY package.json ./
 COPY package-lock.json* ./
+
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 COPY . .
@@ -19,7 +23,7 @@ RUN npm run build
 # ─── Stage 2: Production ─────────────────────────────
 FROM node:20-alpine
 
-# curl 8.x (TLS fingerprint moderno), ca-certs, dumb-init
+# curl 8.x (Alpine), ca-certificates para HTTPS, dumb-init para signals
 RUN apk add --no-cache curl ca-certificates dumb-init wget
 
 # Usuario no-root
@@ -27,10 +31,12 @@ RUN addgroup -S scraper && adduser -S scraper -G scraper
 
 WORKDIR /app
 
+# Solo deps de producción
 COPY package.json ./
 COPY package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
+# Copiar build
 COPY --from=builder /app/dist ./dist
 
 RUN chown -R scraper:scraper /app
@@ -39,7 +45,7 @@ USER scraper
 
 EXPOSE 3457
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3457/search/health || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]

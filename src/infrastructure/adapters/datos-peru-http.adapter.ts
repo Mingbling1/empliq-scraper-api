@@ -60,6 +60,9 @@ const PROXY_LIST_URL =
 export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleInit {
   private readonly logger = new Logger(DatosPeruHttpAdapter.name);
 
+  /** Modo directo: intenta primero sin proxy (IP residencial) */
+  private readonly directMode = process.env.DATOSPERU_DIRECT === 'true';
+
   /** Pool de proxies activos (socks5h://host:port) */
   private proxies: string[] = [...SEED_PROXIES];
   /** Índice round-robin */
@@ -72,6 +75,10 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
   // ════════════════════════════════════════════════════════
 
   async onModuleInit(): Promise<void> {
+    if (this.directMode) {
+      this.logger.log(`[DatosPeru] 🏠 Modo DIRECTO — IP residencial primero, proxies como fallback`);
+      return; // No necesita refrescar proxies al inicio
+    }
     this.logger.log(`[DatosPeru] Inicializando con ${this.proxies.length} proxies seed`);
     // Refrescar proxies en background (no bloquea startup)
     this.refreshProxies().catch(() => {});
@@ -274,13 +281,76 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
   }
 
   /**
-   * GET con rotación de proxies y reintentos automáticos.
-   * Node.js primero, luego curl como fallback.
+   * GET directo sin proxy (IP residencial). Headers de navegador.
+   */
+  private directGet(
+    url: string,
+    timeoutMs = 15000,
+  ): Promise<{ html: string | null; status: number; size: number; error?: string }> {
+    return new Promise((resolve) => {
+      const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+      const req = https.request(
+        url,
+        {
+          method: 'GET',
+          headers: {
+            'User-Agent': ua,
+            Accept:
+              'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'es-PE,es;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'identity',
+            Connection: 'keep-alive',
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf-8');
+            resolve({
+              html: res.statusCode === 200 ? body : null,
+              status: res.statusCode ?? 0,
+              size: body.length,
+            });
+          });
+        },
+      );
+      req.on('error', (err) =>
+        resolve({ html: null, status: 0, size: 0, error: err.message }),
+      );
+      req.setTimeout(timeoutMs, () => {
+        req.destroy();
+        resolve({ html: null, status: 0, size: 0, error: 'timeout' });
+      });
+      req.end();
+    });
+  }
+
+  /**
+   * GET inteligente:
+   * - Modo directo (DATOSPERU_DIRECT=true): directo primero → proxy fallback
+   * - Modo cloud: proxy rotation → curl fallback
    */
   private async getWithProxyRotation(
     url: string,
     timeoutMs = 15000,
   ): Promise<string | null> {
+    // ── Paso 1: Intento directo (si está habilitado) ──
+    if (this.directMode) {
+      this.logger.debug(`[DatosPeru] GET directo ${url.substring(0, 80)}...`);
+      const result = await this.directGet(url, timeoutMs);
+      if (result.html && result.html.length > 1000) {
+        this.logger.log(
+          `[DatosPeru] ✅ Directo OK (HTTP:${result.status}, ${result.size} bytes)`,
+        );
+        return result.html;
+      }
+      this.logger.warn(
+        `[DatosPeru] Directo falló: HTTP:${result.status} SIZE:${result.size}${result.error ? ' ERR:' + result.error : ''} — probando proxies...`,
+      );
+    }
+
+    // ── Paso 2: Proxy rotation ──
     for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
       const proxyUrl = this.nextProxy();
       const agent = this.makeAgent(proxyUrl);
@@ -307,8 +377,17 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
       `[DatosPeru] Todos los proxies Node.js fallaron, intentando curl...`,
     );
 
-    // Fallback: intentar con curl (diferente TLS fingerprint)
-    return this.curlGet(url, timeoutMs);
+    // ── Paso 3: curl fallback (usa proxy si está disponible) ──
+    const curlResult = await this.curlGet(url, timeoutMs);
+    if (curlResult) return curlResult;
+
+    // ── Paso 4: curl DIRECTO sin proxy (curl 8.x Alpine tiene TLS moderno) ──
+    if (!this.directMode) {
+      this.logger.warn(`[DatosPeru] curl con proxy falló, último intento: curl directo...`);
+      return this.curlDirectGet(url, timeoutMs);
+    }
+
+    return null;
   }
 
   /**
@@ -318,18 +397,27 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     return new Promise((resolve) => {
       const { execFile } = require('child_process');
       const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-      const proxyUrl = this.proxies[this.proxyIdx % this.proxies.length]
-        .replace('socks5h://', '');
 
       const args = [
         '-s', '-L', '-k',
         '--max-time', String(Math.floor(timeoutMs / 1000)),
-        '--socks5-hostname', proxyUrl,
         '-H', `User-Agent: ${ua}`,
         '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         '-H', 'Accept-Language: es-PE,es;q=0.9',
-        url,
       ];
+
+      // En modo proxy, añadir SOCKS5 proxy
+      if (!this.directMode && this.proxies.length > 0) {
+        const proxyUrl = this.proxies[this.proxyIdx % this.proxies.length]
+          .replace('socks5h://', '');
+        args.push('--socks5-hostname', proxyUrl);
+      }
+
+      args.push(url);
+
+      this.logger.debug(
+        `[DatosPeru] curl ${this.directMode ? 'directo' : 'via proxy'}: ${url.substring(0, 80)}...`,
+      );
 
       execFile('curl', args, { maxBuffer: 1024 * 1024 }, (err: any, stdout: string) => {
         if (err || !stdout || stdout.length < 1000) {
@@ -339,6 +427,43 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
           resolve(null);
         } else {
           this.logger.log(`[DatosPeru] ✅ curl OK (${stdout.length} bytes)`);
+          resolve(stdout);
+        }
+      });
+    });
+  }
+
+  /**
+   * Último recurso: curl DIRECTO sin ningún proxy.
+   * En Alpine con curl 8.x/OpenSSL 3.5, el TLS fingerprint
+   * es moderno y puede pasar Cloudflare incluso desde datacenter.
+   */
+  private curlDirectGet(url: string, timeoutMs = 15000): Promise<string | null> {
+    return new Promise((resolve) => {
+      const { execFile } = require('child_process');
+      const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
+      const args = [
+        '-s', '-L', '-k',
+        '--max-time', String(Math.floor(timeoutMs / 1000)),
+        '-H', `User-Agent: ${ua}`,
+        '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        '-H', 'Accept-Language: es-PE,es;q=0.9',
+        url,
+      ];
+
+      this.logger.debug(
+        `[DatosPeru] curl DIRECTO (sin proxy): ${url.substring(0, 80)}...`,
+      );
+
+      execFile('curl', args, { maxBuffer: 1024 * 1024 }, (err: any, stdout: string) => {
+        if (err || !stdout || stdout.length < 1000) {
+          this.logger.warn(
+            `[DatosPeru] curl directo falló: ${err?.message || 'empty'} (${stdout?.length || 0} bytes)`,
+          );
+          resolve(null);
+        } else {
+          this.logger.log(`[DatosPeru] ✅ curl DIRECTO OK (${stdout.length} bytes)`);
           resolve(stdout);
         }
       });
