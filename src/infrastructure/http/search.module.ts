@@ -3,9 +3,11 @@ import { ConfigModule } from '@nestjs/config';
 import { SearchController } from './controllers/search.controller';
 import { ScrapeController } from './controllers/scrape.controller';
 import { EnrichController } from './controllers/enrich.controller';
+import { ProxyController } from './controllers/proxy.controller';
 import { SearchOrchestratorService } from '../../application/services/search-orchestrator.service';
 import { CompanyProfileService } from '../../application/services/company-profile.service';
 import { EnrichmentService } from '../../application/services/enrichment.service';
+import { ProxyTestService } from '../../application/services/proxy-test.service';
 import { DdgHttpAdapter } from '../adapters/ddg-http.adapter';
 import { BingHttpAdapter } from '../adapters/bing-http.adapter';
 import { UniversidadPeruHttpAdapter } from '../adapters/universidad-peru-http.adapter';
@@ -16,7 +18,7 @@ import { DATOS_PERU_ENRICHMENT_PORT } from '../../domain/ports/datos-peru-enrich
 
 @Module({
   imports: [ConfigModule],
-  controllers: [SearchController, ScrapeController, EnrichController],
+  controllers: [SearchController, ScrapeController, EnrichController, ProxyController],
   providers: [
     // Adaptadores de búsqueda (implementan SearchEnginePort) — HTTP puro, sin browser
     {
@@ -46,6 +48,7 @@ import { DATOS_PERU_ENRICHMENT_PORT } from '../../domain/ports/datos-peru-enrich
     SearchOrchestratorService,
     CompanyProfileService,
     EnrichmentService,
+    ProxyTestService,
   ],
   exports: [SearchOrchestratorService, CompanyProfileService, EnrichmentService],
 })
