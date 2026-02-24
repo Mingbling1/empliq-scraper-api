@@ -45,11 +45,9 @@ export class OracleStorageAdapter implements StoragePort {
     this.logger.log(`📤 Subiendo ${objectName} (${file.length} bytes, ${contentType})`);
 
     try {
-      // Convert Buffer to Uint8Array for Node.js fetch compatibility
-      const body = new Uint8Array(file.buffer, file.byteOffset, file.byteLength);
       const response = await fetch(uploadUrl, {
         method: 'PUT',
-        body,
+        body: new Blob([file], { type: contentType }),
         headers: {
           'Content-Type': contentType,
           'Content-Length': file.length.toString(),
