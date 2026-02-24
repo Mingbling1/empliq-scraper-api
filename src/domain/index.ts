@@ -7,3 +7,6 @@ export { SearchEnginePort, SEARCH_ENGINE_PORT } from './ports/search-engine.port
 export { WebsiteScraperPort, WEBSITE_SCRAPER_PORT } from './ports/website-scraper.port';
 export type { ScrapeOptions } from './ports/website-scraper.port';
 export { DatosPeruEnrichmentPort, DATOS_PERU_ENRICHMENT_PORT } from './ports/datos-peru-enrichment.port';
+export { LogoProviderPort, LOGO_PROVIDER_PRIMARY, LOGO_PROVIDER_FALLBACK } from './ports/logo-provider.port';
+export { StoragePort, STORAGE_PORT } from './ports/storage.port';
+export { LogoResult } from './entities/logo-result.entity';
