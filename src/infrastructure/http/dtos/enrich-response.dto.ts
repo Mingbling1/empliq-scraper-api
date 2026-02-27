@@ -34,6 +34,11 @@ export class DatosPeruEnrichResponseDto {
   @ApiProperty() ruc: string;
   @ApiProperty() sourceUrl: string;
 
+  /** Tipo de error: not_found | proxy_error | parse_error (solo si success=false) */
+  @ApiPropertyOptional() errorType: string | null;
+  /** Detalle del error (solo si success=false) */
+  @ApiPropertyOptional() errorMessage: string | null;
+
   // Datos básicos
   @ApiPropertyOptional() nombre: string | null;
   @ApiPropertyOptional() fechaInicio: string | null;

@@ -2,8 +2,8 @@ import { Injectable, Inject, Logger } from '@nestjs/common';
 import {
   DatosPeruEnrichmentPort,
   DATOS_PERU_ENRICHMENT_PORT,
+  EnrichResult,
 } from '../../domain/ports/datos-peru-enrichment.port';
-import { DatosPeruProfile } from '../../domain/entities/datos-peru-profile.entity';
 
 /**
  * Servicio de enriquecimiento de datos de empresas.
@@ -26,8 +26,9 @@ export class EnrichmentService {
 
   /**
    * Enriquece datos de una empresa por su RUC desde datosperu.org.
+   * Retorna resultado estructurado con tipo de error si falla.
    */
-  async enrichFromDatosPeru(ruc: string): Promise<DatosPeruProfile | null> {
+  async enrichFromDatosPeru(ruc: string): Promise<EnrichResult> {
     this.logger.log(`🔎 Enriqueciendo RUC ${ruc} desde DatosPeru`);
     return this.datosPeru.enrich(ruc);
   }

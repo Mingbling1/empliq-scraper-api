@@ -1,10 +1,11 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import * as https from 'https';
 import * as http from 'http';
 import * as cheerio from 'cheerio';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import {
   DatosPeruEnrichmentPort,
+  EnrichResult,
 } from '../../domain/ports/datos-peru-enrichment.port';
 import {
   DatosPeruProfile,
@@ -57,7 +58,7 @@ const PROXY_LIST_URL =
   'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt';
 
 @Injectable()
-export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleInit {
+export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DatosPeruHttpAdapter.name);
 
   /** Modo directo: intenta primero sin proxy (IP residencial) */
@@ -69,6 +70,17 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
   private proxyIdx = 0;
   /** Cuántos reintentos por request */
   private readonly MAX_RETRIES = 3;
+
+  /** Conteo de fallos consecutivos por proxy */
+  private proxyFailCounts = new Map<string, number>();
+  /** Proxies descartados por exceso de fallos */
+  private blacklistedProxies = new Set<string>();
+  /** Máximo de fallos antes de blacklistear */
+  private readonly BLACKLIST_THRESHOLD = 3;
+  /** Intervalo de refresco periódico */
+  private refreshInterval: NodeJS.Timeout | null = null;
+  /** Cada cuánto refrescar la lista de proxies (30 min) */
+  private readonly REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
   // ════════════════════════════════════════════════════════
   //  LIFECYCLE
@@ -82,32 +94,61 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     this.logger.log(`[DatosPeru] Inicializando con ${this.proxies.length} proxies seed`);
     // Refrescar proxies en background (no bloquea startup)
     this.refreshProxies().catch(() => {});
+    // Refrescar periódicamente
+    this.refreshInterval = setInterval(() => {
+      this.logger.log(`[DatosPeru] ⏰ Refresco periódico de proxies...`);
+      this.refreshProxies().catch(() => {});
+    }, this.REFRESH_INTERVAL_MS);
+  }
+
+  onModuleDestroy(): void {
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+      this.refreshInterval = null;
+    }
   }
 
   // ════════════════════════════════════════════════════════
   //  PUBLIC API
   // ════════════════════════════════════════════════════════
 
-  async enrich(ruc: string): Promise<DatosPeruProfile | null> {
+  async enrich(ruc: string): Promise<EnrichResult> {
     const start = Date.now();
     this.logger.log(`[DatosPeru] Enriqueciendo RUC ${ruc}`);
 
     try {
       // Paso 1: Buscar URL de la empresa por RUC
-      const companyPath = await this.searchByRuc(ruc);
-      if (!companyPath) {
-        this.logger.warn(`[DatosPeru] No se encontró empresa para RUC ${ruc}`);
-        return null;
+      const searchResult = await this.searchByRuc(ruc);
+
+      if (!searchResult.path) {
+        if (searchResult.notFoundOnSite) {
+          this.logger.warn(`[DatosPeru] RUC ${ruc} no existe en DatosPeru (no reintentar)`);
+          return {
+            profile: null,
+            errorType: 'not_found',
+            errorMessage: `RUC ${ruc} not found on datosperu.org`,
+          };
+        }
+        this.logger.warn(`[DatosPeru] No se pudo buscar RUC ${ruc} (proxies fallaron)`);
+        return {
+          profile: null,
+          errorType: 'proxy_error',
+          errorMessage: 'All proxies failed during search',
+        };
       }
 
-      const companyUrl = `${BASE_URL}/${companyPath}`;
+      const companyUrl = `${BASE_URL}/${searchResult.path}`;
       this.logger.log(`[DatosPeru] URL encontrada: ${companyUrl}`);
 
       // Paso 2: Descargar página de la empresa
       const html = await this.fetchPage(companyUrl);
       if (!html) {
         this.logger.warn(`[DatosPeru] No se pudo descargar ${companyUrl}`);
-        return null;
+        return {
+          profile: null,
+          errorType: 'proxy_error',
+          errorMessage: 'All proxies failed during page fetch',
+        };
       }
 
       // Paso 3: Parsear HTML y extraer datos
@@ -119,12 +160,16 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         `[DatosPeru] ✅ ${profile.summary} (${profile.durationMs}ms)`,
       );
 
-      return profile;
+      return { profile };
     } catch (err) {
       this.logger.error(
         `[DatosPeru] Error enriqueciendo RUC ${ruc}: ${(err as Error).message}`,
       );
-      return null;
+      return {
+        profile: null,
+        errorType: 'parse_error',
+        errorMessage: (err as Error).message,
+      };
     }
   }
 
@@ -132,11 +177,42 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
   //  PROXY MANAGEMENT
   // ════════════════════════════════════════════════════════
 
-  /** Obtiene un proxy SOCKS5 del pool (round-robin) */
+  /** Obtiene un proxy SOCKS5 del pool (round-robin), saltando blacklisteados */
   private nextProxy(): string {
-    const proxy = this.proxies[this.proxyIdx % this.proxies.length];
+    const available = this.proxies.filter(p => !this.blacklistedProxies.has(p));
+    if (available.length === 0) {
+      // Todos blacklisteados → reset y forzar refresco
+      this.logger.warn(
+        `[DatosPeru] ⚠️ Todos los ${this.proxies.length} proxies blacklisteados, reseteando...`,
+      );
+      this.blacklistedProxies.clear();
+      this.proxyFailCounts.clear();
+      // Trigger refresh en background
+      this.refreshProxies().catch(() => {});
+      const proxy = this.proxies[this.proxyIdx % this.proxies.length];
+      this.proxyIdx++;
+      return proxy;
+    }
+    const proxy = available[this.proxyIdx % available.length];
     this.proxyIdx++;
     return proxy;
+  }
+
+  /** Registra un fallo para un proxy. Si supera el umbral → blacklist */
+  private markProxyFailed(proxyUrl: string): void {
+    const count = (this.proxyFailCounts.get(proxyUrl) || 0) + 1;
+    this.proxyFailCounts.set(proxyUrl, count);
+    if (count >= this.BLACKLIST_THRESHOLD) {
+      this.blacklistedProxies.add(proxyUrl);
+      this.logger.warn(
+        `[DatosPeru] 🚫 Proxy blacklisteado (${count} fallos): ${proxyUrl}`,
+      );
+    }
+  }
+
+  /** Registra un éxito para un proxy → resetea su contador de fallos */
+  private markProxySuccess(proxyUrl: string): void {
+    this.proxyFailCounts.delete(proxyUrl);
   }
 
   /** Crea un SocksProxyAgent para el proxy dado */
@@ -182,12 +258,15 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
       if (working.length > 0) {
         this.proxies = working;
         this.proxyIdx = 0;
+        // Limpiar blacklist ya que tenemos proxies frescos
+        this.blacklistedProxies.clear();
+        this.proxyFailCounts.clear();
         this.logger.log(
           `[DatosPeru] ✅ ${working.length} proxies funcionales encontrados`,
         );
       } else {
         this.logger.warn(
-          `[DatosPeru] No se encontraron proxies nuevos, manteniendo ${this.proxies.length} seed`,
+          `[DatosPeru] No se encontraron proxies nuevos, manteniendo ${this.proxies.length} (${this.blacklistedProxies.size} blacklisteados)`,
         );
       }
     } catch (err) {
@@ -362,12 +441,14 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
       const result = await this.httpGet(url, agent, timeoutMs);
 
       if (result.html && result.html.length > 1000) {
+        this.markProxySuccess(proxyUrl);
         this.logger.log(
           `[DatosPeru] ✅ Proxy ${proxyUrl} OK (HTTP:${result.status}, ${result.size} bytes)`,
         );
         return result.html;
       }
 
+      this.markProxyFailed(proxyUrl);
       this.logger.warn(
         `[DatosPeru] Proxy ${proxyUrl} falló: HTTP:${result.status} SIZE:${result.size}${result.error ? ' ERR:' + result.error : ''} — rotando...`,
       );
@@ -476,21 +557,30 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
 
   /**
    * GET /buscador_empresas.php?buscar={ruc}
-   * Retorna el path relativo de la empresa (ej: "empresa-banco-de-credito-del-peru-20100047218.php")
+   * Retorna el path relativo de la empresa o indica si no existe en DatosPeru.
    */
-  private async searchByRuc(ruc: string): Promise<string | null> {
+  private async searchByRuc(
+    ruc: string,
+  ): Promise<{ path: string | null; notFoundOnSite: boolean }> {
     const url = `${BASE_URL}${SEARCH_PATH}?buscar=${encodeURIComponent(ruc)}`;
     const html = await this.getWithProxyRotation(url);
-    if (!html) return null;
+
+    if (!html) {
+      // No se pudo cargar la página de búsqueda → proxy/network issue
+      return { path: null, notFoundOnSite: false };
+    }
 
     // Extraer el primer link que empiece con empresa-...{ruc}.php
     const regex = new RegExp(`href="(empresa-[^"]*${ruc}\\.php)"`, 'i');
     const match = html.match(regex);
-    if (match) return match[1];
+    if (match) return { path: match[1], notFoundOnSite: false };
 
     // Fallback: cualquier link de empresa
     const fallback = html.match(/href="(empresa-[^"]+\.php)"/i);
-    return fallback ? fallback[1] : null;
+    if (fallback) return { path: fallback[1], notFoundOnSite: false };
+
+    // Se cargó la página pero NO hay empresa → RUC no existe en DatosPeru
+    return { path: null, notFoundOnSite: true };
   }
 
   // ════════════════════════════════════════════════════════

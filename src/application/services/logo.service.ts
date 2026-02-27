@@ -6,6 +6,11 @@ import {
 } from '../../domain/ports/logo-provider.port';
 import { StoragePort, STORAGE_PORT } from '../../domain/ports/storage.port';
 import { LogoResult } from '../../domain/entities/logo-result.entity';
+import {
+  cleanCompanyName,
+  generateSearchVariants,
+} from '../../shared/utils/company-name-cleaner';
+import { guessPeruvianDomain } from '../../shared/utils/domain-guesser';
 
 export interface LogoFetchResult {
   success: boolean;
@@ -80,16 +85,43 @@ export class LogoService {
       }
     }
 
-    // 2. Intentar proveedor primario por nombre comercial (logo.dev/name)
-    if (!logo && name && this.primaryProvider.fetchLogoByName) {
-      try {
-        logo = await this.primaryProvider.fetchLogoByName(name);
-      } catch (error) {
-        this.logger.warn(`Error en ${this.primaryProvider.providerName} (nombre): ${error}`);
+    // 2. Intentar con dominios adivinados para empresas peruanas conocidas
+    if (!logo && name) {
+      const guessedDomains = guessPeruvianDomain(name);
+      for (const gd of guessedDomains) {
+        if (gd === domain) continue; // Ya lo intentamos
+        this.logger.log(`🔮 Intentando dominio adivinado: ${gd}`);
+        try {
+          logo = await this.primaryProvider.fetchLogo(gd);
+          if (logo) {
+            this.logger.log(`✅ Logo encontrado con dominio adivinado: ${gd}`);
+            break;
+          }
+        } catch (error) {
+          this.logger.warn(`Error con dominio adivinado ${gd}: ${error}`);
+        }
       }
     }
 
-    // 3. Fallback a Brandfetch por dominio
+    // 3. Intentar proveedor primario por variantes de nombre (logo.dev/name)
+    if (!logo && name && this.primaryProvider.fetchLogoByName) {
+      const variants = generateSearchVariants(name);
+      this.logger.log(`📝 Variantes de búsqueda para "${name}": [${variants.join(', ')}]`);
+
+      for (const variant of variants) {
+        try {
+          logo = await this.primaryProvider.fetchLogoByName(variant);
+          if (logo) {
+            this.logger.log(`✅ Logo encontrado con variante: "${variant}"`);
+            break;
+          }
+        } catch (error) {
+          this.logger.warn(`Error en ${this.primaryProvider.providerName} (nombre: "${variant}"): ${error}`);
+        }
+      }
+    }
+
+    // 4. Fallback a Brandfetch por dominio
     if (!logo && domain) {
       this.logger.log(`Intentando fallback (${this.fallbackProvider.providerName})...`);
       try {

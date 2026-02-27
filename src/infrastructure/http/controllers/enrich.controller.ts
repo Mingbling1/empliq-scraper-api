@@ -49,6 +49,8 @@ export class EnrichController {
         success: false,
         ruc: ruc || '',
         sourceUrl: '',
+        errorType: 'invalid_ruc',
+        errorMessage: `Invalid RUC format: ${ruc}`,
         nombre: null,
         fechaInicio: null,
         fechaInscripcion: null,
@@ -79,13 +81,16 @@ export class EnrichController {
       };
     }
 
-    const profile = await this.enrichmentService.enrichFromDatosPeru(ruc);
+    const result = await this.enrichmentService.enrichFromDatosPeru(ruc);
+    const profile = result.profile;
 
     if (!profile) {
       return {
         success: false,
         ruc,
         sourceUrl: '',
+        errorType: result.errorType || 'unknown',
+        errorMessage: result.errorMessage || 'Unknown error',
         nombre: null,
         fechaInicio: null,
         fechaInscripcion: null,
@@ -120,6 +125,8 @@ export class EnrichController {
       success: profile.fieldsExtracted > 0,
       ruc: profile.ruc,
       sourceUrl: profile.sourceUrl,
+      errorType: null,
+      errorMessage: null,
       nombre: profile.nombre,
       fechaInicio: profile.fechaInicio,
       fechaInscripcion: profile.fechaInscripcion,

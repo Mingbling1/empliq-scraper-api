@@ -47,7 +47,7 @@ export class OracleStorageAdapter implements StoragePort {
     try {
       const response = await fetch(uploadUrl, {
         method: 'PUT',
-        body: file as unknown as BodyInit,
+        body: new Uint8Array(file),
         headers: {
           'Content-Type': contentType,
           'Content-Length': file.length.toString(),
