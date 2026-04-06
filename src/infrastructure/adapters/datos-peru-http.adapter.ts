@@ -470,21 +470,21 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
       );
     }
 
-    this.logger.error(
-      `[DatosPeru] Todos los proxies Node.js fallaron, intentando curl...`,
-    );
+    const proxiesFailed403 = consecutive403s >= 2;
 
-    // ── Paso 3: curl fallback (usa proxy si está disponible) ──
-    const curlResult = await this.curlGet(url, timeoutMs);
-    if (curlResult) return curlResult;
-
-    // ── Paso 4: curl DIRECTO sin proxy (curl 8.x Alpine tiene TLS moderno) ──
-    if (!this.directMode) {
-      this.logger.warn(`[DatosPeru] curl con proxy falló, último intento: curl directo...`);
+    // ── Paso 3: curl fallback ──
+    // Si proxies dieron 403, usar curl DIRECTO (sin proxy) porque el proxy está bloqueado
+    if (proxiesFailed403) {
+      this.logger.warn(`[DatosPeru] Saltando curl con proxy, usando curl directo...`);
       return this.curlDirectGet(url, timeoutMs);
     }
 
-    return null;
+    // otherwise try curl with proxy first, then direct as fallback
+    const curlResult = await this.curlGet(url, timeoutMs);
+    if (curlResult) return curlResult;
+
+    this.logger.warn(`[DatosPeru] curl con proxy falló, intentando curl directo...`);
+    return this.curlDirectGet(url, timeoutMs);
   }
 
   /**
