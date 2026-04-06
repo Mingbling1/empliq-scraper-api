@@ -429,7 +429,8 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
       );
     }
 
-    // ── Paso 2: Proxy rotation ──
+    // ── Paso 2: Proxy rotation (rápido - si todos 403, saltar a curl) ──
+    let consecutive403s = 0;
     for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
       const proxyUrl = this.nextProxy();
       const agent = this.makeAgent(proxyUrl);
@@ -448,7 +449,22 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         return result.html;
       }
 
-      this.markProxyFailed(proxyUrl);
+      // Si es 403,很可能 el proxy está bloquedo - contar consecutivos
+      if (result.status === 403) {
+        consecutive403s++;
+        this.markProxyFailed(proxyUrl);
+        // Si 2+ proxies dan 403 consecutivamente, saltar a curl inmediatamente
+        if (consecutive403s >= 2) {
+          this.logger.warn(
+            `[DatosPeru] 🚫 ${consecutive403s} proxies con 403 - saltando a curl`,
+          );
+          break;
+        }
+      } else {
+        consecutive403s = 0;
+        this.markProxyFailed(proxyUrl);
+      }
+
       this.logger.warn(
         `[DatosPeru] Proxy ${proxyUrl} falló: HTTP:${result.status} SIZE:${result.size}${result.error ? ' ERR:' + result.error : ''} — rotando...`,
       );
