@@ -11,7 +11,7 @@ export interface DatosPeruExecutive {
 
 export interface DatosPeruBranch {
   direccion: string;
-  ubicacion: string | null; // "ANCASH - SANTA - CHIMBOTE"
+  ubicacion: string | null; // "AG. AGENCIA", "SU. SUCURSAL"
 }
 
 export interface DatosPeruWorkerHistory {
@@ -33,18 +33,34 @@ export interface DatosPeruHistoricalCondition {
 }
 
 export class DatosPeruProfile {
-  /** URL fuente en datosperu.org */
   sourceUrl: string;
 
-  // ── Datos básicos ──
+  // ── Datos básicos SUNAT ──
   nombre: string | null;
   ruc: string;
-  fechaInicio: string | null; // "02/01/1986"
-  fechaInscripcion: string | null; // "07/08/1993"
-  estado: string | null; // "ACTIVO"
-  tipo: string | null; // "GOBIERNO CENTRAL", "SOCIEDAD ANONIMA CERRADA"
-  ciiu: string | null; // "8423"
-  sectorEconomico: string | null; // "ACTIVIDADES DE MANTENIMIENTO DEL ORDEN..."
+  fechaInicio: string | null;
+  fechaInscripcion: string | null;
+  estado: string | null; // "ACTIVO", "BAJA DE OFICIO", etc.
+  tipo: string | null; // "SOCIEDAD ANONIMA", "EMPRESA INDIVIDUAL", etc.
+  condicion: string | null; // "HABIDO", "NO HABIDO", "ANULADO", etc.
+  tipoContribuyente: string | null; // "SOCIEDAD ANONIMA CERRADA", etc.
+
+  // ── CIIU / Actividades ──
+  ciiu: string | null; // Código CIIU principal
+  sectorEconomico: string | null; // Primera actividad económica (para compatibilidad)
+  actividadesEconomicas: string[]; // Todas las actividades económicas
+
+  // ── Sistemas de emisión / contabilidad ──
+  sistemaEmisionComprobantes: string | null;
+  sistemaContabilidad: string | null;
+  actividadComercioExterior: string | null;
+  comprobantesPagoAutorizados: string[]; // ["FACTURA", "BOLETA", etc.]
+  comprobantesElectronicos: { tipo: string; fecha: string }[];
+  sistemasEmisionElectronica: string[];
+
+  // ── Deuda coactiva ──
+  deudaCoactivaReacta: boolean;
+  deudaCoactivaCovid: boolean;
 
   // ── Dirección ──
   direccion: string | null;
@@ -91,8 +107,19 @@ export class DatosPeruProfile {
     this.fechaInscripcion = null;
     this.estado = null;
     this.tipo = null;
+    this.condicion = null;
+    this.tipoContribuyente = null;
     this.ciiu = null;
     this.sectorEconomico = null;
+    this.actividadesEconomicas = [];
+    this.sistemaEmisionComprobantes = null;
+    this.sistemaContabilidad = null;
+    this.actividadComercioExterior = null;
+    this.comprobantesPagoAutorizados = [];
+    this.comprobantesElectronicos = [];
+    this.sistemasEmisionElectronica = [];
+    this.deudaCoactivaReacta = false;
+    this.deudaCoactivaCovid = false;
     this.direccion = null;
     this.referencia = null;
     this.departamento = null;
@@ -121,10 +148,22 @@ export class DatosPeruProfile {
     if (this.fechaInicio) count++;
     if (this.estado) count++;
     if (this.tipo) count++;
+    if (this.condicion) count++;
+    if (this.tipoContribuyente) count++;
     if (this.ciiu) count++;
     if (this.sectorEconomico) count++;
+    if (this.actividadesEconomicas.length > 0) count++;
+    if (this.sistemaEmisionComprobantes) count++;
+    if (this.sistemaContabilidad) count++;
+    if (this.actividadComercioExterior) count++;
+    if (this.comprobantesPagoAutorizados.length > 0) count++;
+    if (this.comprobantesElectronicos.length > 0) count++;
+    if (this.sistemasEmisionElectronica.length > 0) count++;
+    if (this.deudaCoactivaReacta || this.deudaCoactivaCovid) count++;
     if (this.direccion) count++;
     if (this.departamento) count++;
+    if (this.provincia) count++;
+    if (this.distrito) count++;
     if (this.telefonos.length > 0) count++;
     if (this.web) count++;
     if (this.descripcion) count++;
@@ -141,10 +180,11 @@ export class DatosPeruProfile {
     if (this.nombre) parts.push(`name="${this.nombre}"`);
     parts.push(`ruc=${this.ruc}`);
     if (this.estado) parts.push(`estado=${this.estado}`);
+    if (this.condicion) parts.push(`cond=${this.condicion}`);
     if (this.tipo) parts.push(`tipo=${this.tipo}`);
     if (this.ejecutivos.length) parts.push(`ejecutivos=${this.ejecutivos.length}`);
-    if (this.historialTrabajadores.length) parts.push(`periodos_trab=${this.historialTrabajadores.length}`);
     if (this.establecimientosAnexos.length) parts.push(`anexos=${this.establecimientosAnexos.length}`);
+    if (this.actividadesEconomicas.length) parts.push(`acts=${this.actividadesEconomicas.length}`);
     return `[${this.fieldsExtracted} fields] ${parts.join(', ')}`;
   }
 }

@@ -660,19 +660,18 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
       profile.nombre = this.cleanText(h1.text());
     }
 
-    // Buscar la sección "DATOS DE LA EMPRESA" con grid layout
-    const section = $('h2:contains("DATOS DE LA EMPRESA")').next('div.grid');
-    if (!section.length) return;
+    // Buscar TODOS los divs con bg-gray-50.rounded-lg en la página
+    // para capturar todos los campos de DATOS DE LA EMPRESA
+    const allCards = $('body').find('.bg-gray-50.rounded-lg').toArray();
 
-    // Cada campo es un div con bg-gray-50.rounded-lg
-    const items = section.find('.bg-gray-50.rounded-lg').toArray();
-
-    for (const item of items) {
+    for (const item of allCards) {
       const $item = $(item);
-      const label = $item.find('.text-xs.text-gray-500.uppercase.font-medium').text().trim().toUpperCase();
+      const labelEl = $item.find('.text-xs.text-gray-500.uppercase.font-medium');
+      const label = labelEl.text().trim().toUpperCase();
       const valueEl = $item.find('.text-sm.font-semibold.text-gray-900');
       let value = valueEl.text().trim();
 
+      // Si el valor tiene links, tomar el texto del link
       const linkInValue = valueEl.find('a');
       if (linkInValue.length) {
         value = linkInValue.text().trim();
@@ -680,14 +679,18 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
 
       if (!label) continue;
 
+      // Categorizar según el label
       switch (true) {
         case label.includes('RUC'):
           break;
         case label.includes('TIPO CONTRIBUYENTE'):
-          profile.tipo = this.cleanText(value) || null;
+          profile.tipoContribuyente = this.cleanText(value) || null;
           break;
         case label.includes('ESTADO CONTRIBUYENTE'):
           profile.estado = value || null;
+          break;
+        case label.includes('CONDICI'):
+          profile.condicion = value || null;
           break;
         case label.includes('FECHA INSCRIPCI'):
           profile.fechaInscripcion = value || null;
@@ -695,44 +698,76 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
         case label.includes('FECHA INICIO'):
           profile.fechaInicio = value || null;
           break;
-        case label.startsWith('TELEFONO') || label.includes('TEL'):
-          if (value && value !== '-' && !label.includes('COMPROBANTE')) {
-            profile.telefonos.push(value);
+        case label.includes('SISTEMA EMISI') && label.includes('COMPROBANTE'):
+          profile.sistemaEmisionComprobantes = this.cleanText(value) || null;
+          break;
+        case label.includes('SISTEMA CONTABILIDAD'):
+          profile.sistemaContabilidad = this.cleanText(value) || null;
+          break;
+        case label.includes('ACTIVIDAD COMERCIO EXTERIOR'):
+          profile.actividadComercioExterior = this.cleanText(value) || null;
+          break;
+        case label.includes('COMPROBANTES DE PAGO AUTORIZADOS'):
+          // Múltiples comprobantes separados por coma
+          const comps = value.split(',').map(c => c.trim()).filter(c => c && c !== '-');
+          profile.comprobantesPagoAutorizados = comps;
+          break;
+        case label.includes('DOMICILIO FISCAL'):
+          if (!profile.direccion && value) {
+            profile.direccion = this.cleanText(value);
           }
+          // Buscar ubigeo en el texto gris
+          const ubigeoText = $item.find('.text-sm.text-gray-600').text().trim();
+          if (ubigeoText) {
+            const ubigeoMatch = ubigeoText.match(/([A-ZÀ-Ú\s]+)\s*-\s*([A-ZÀ-Ú\s]+)\s*-\s*([A-ZÀ-Ú\s]+)/i);
+            if (ubigeoMatch) {
+              profile.departamento = ubigeoMatch[1]?.trim() || null;
+              profile.provincia = ubigeoMatch[2]?.trim() || null;
+              profile.distrito = ubigeoMatch[3]?.trim() || null;
+            }
+          }
+          break;
+        case label.includes('TELEFONO') || (label.startsWith('TEL') && !label.includes('COMPROBANTE')):
+          if (value && value !== '-' && value.length < 30) {
+            profile.telefonos.push(this.cleanText(value));
+          }
+          break;
+        // Deuda coactiva REACTIVA
+        case label.includes('REACTIVA'):
+          profile.deudaCoactivaReacta = value.toUpperCase().includes('SI') || value.includes('S/');
+          break;
+        // Deuda coactiva COVID
+        case label.includes('COVID'):
+          profile.deudaCoactivaCovid = value.toUpperCase().includes('SI') || value.includes('S/');
           break;
       }
     }
 
-    // Buscar Domicilio Fiscal en todo el body (está después del grid)
-    const domItems = $('body').find('.bg-gray-50.rounded-lg').toArray();
-    for (const item of domItems) {
-      const $item = $(item);
-      const label = $item.find('.text-xs.text-gray-500.uppercase.font-medium').text().trim().toUpperCase();
-      if (label.includes('DOMICILIO FISCAL')) {
-        const value = $item.find('.text-sm.font-semibold.text-gray-900').text().trim();
-        if (value && !profile.direccion) {
-          profile.direccion = this.cleanText(value);
-        }
-        const ubigeoText = $item.find('.text-sm.text-gray-600').text().trim();
-        if (ubigeoText) {
-          const ubigeoMatch = ubigeoText.match(/([A-ZÀ-Ú\s]+)\s*-\s*([A-ZÀ-Ú\s]+)\s*-\s*([A-ZÀ-Ú\s]+)/i);
-          if (ubigeoMatch) {
-            profile.departamento = ubigeoMatch[1]?.trim() || null;
-            profile.provincia = ubigeoMatch[2]?.trim() || null;
-            profile.distrito = ubigeoMatch[3]?.trim() || null;
-          }
-        }
-        break;
-      }
-    }
-
-    // Extraer web desde la cabecera (buscar enlaces externos)
+    // Extraer web desde enlaces externos en la página
     const links = $('a[href]').toArray();
     for (const a of links) {
       const href = $(a).attr('href') || '';
       if (href.startsWith('http') && !href.includes('datosperu') && !href.includes('google') && !href.includes('facebook')) {
         profile.web = href;
         break;
+      }
+    }
+
+    // Extraer actividades económicas (CIIU badges y nombres de actividad)
+    const actividades = $('a.text-sm.text-teal-700').toArray();
+    for (const act of actividades) {
+      const text = $(act).text().trim();
+      if (text && text.length > 5 && text.length < 200) {
+        profile.actividadesEconomicas.push(this.cleanText(text));
+      }
+    }
+
+    // Extraer sistemas de emisión electrónica (buscar en badges o tags)
+    const sistemasBadges = $('span.inline-flex.items-center.px-2\\.5.py-0\\.5.rounded-full').toArray();
+    for (const badge of sistemasBadges) {
+      const text = $(badge).text().trim();
+      if (text && text.length > 3 && text.length < 50 && !profile.sistemasEmisionElectronica.includes(text)) {
+        profile.sistemasEmisionElectronica.push(text);
       }
     }
   }

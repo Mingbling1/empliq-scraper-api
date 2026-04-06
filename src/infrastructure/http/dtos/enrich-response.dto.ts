@@ -39,14 +39,31 @@ export class DatosPeruEnrichResponseDto {
   /** Detalle del error (solo si success=false) */
   @ApiPropertyOptional() errorMessage: string | null;
 
-  // Datos básicos
+  // Datos básicos SUNAT
   @ApiPropertyOptional() nombre: string | null;
   @ApiPropertyOptional() fechaInicio: string | null;
   @ApiPropertyOptional() fechaInscripcion: string | null;
   @ApiPropertyOptional() estado: string | null;
   @ApiPropertyOptional() tipo: string | null;
+  @ApiPropertyOptional() condicion: string | null;
+  @ApiPropertyOptional() tipoContribuyente: string | null;
+
+  // CIIU / Actividades
   @ApiPropertyOptional() ciiu: string | null;
   @ApiPropertyOptional() sectorEconomico: string | null;
+  @ApiProperty({ type: [String] }) actividadesEconomicas: string[];
+
+  // Sistemas de emisión / contabilidad
+  @ApiPropertyOptional() sistemaEmisionComprobantes: string | null;
+  @ApiPropertyOptional() sistemaContabilidad: string | null;
+  @ApiPropertyOptional() actividadComercioExterior: string | null;
+  @ApiProperty({ type: [String] }) comprobantesPagoAutorizados: string[];
+  @ApiProperty({ type: Object }) comprobantesElectronicos: { tipo: string; fecha: string }[];
+  @ApiProperty({ type: [String] }) sistemasEmisionElectronica: string[];
+
+  // Deuda coactiva
+  @ApiProperty() deudaCoactivaReacta: boolean;
+  @ApiProperty() deudaCoactivaCovid: boolean;
 
   // Dirección
   @ApiPropertyOptional() direccion: string | null;
