@@ -633,158 +633,225 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     return profile;
   }
 
-  // ── DATOS EMPRESA (sección lateral) ──
+  // ── DATOS DE LA EMPRESA (grid cards - Astro v5) ──
   private parseDatosEmpresa(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    // La sección "DATOS EMPRESA" tiene <ul class="list-unstyled"> con <li><strong>LABEL</strong><span>VALUE</span></li>
-    const section = $('h2:contains("DATOS EMPRESA")').closest('div');
+    // Extraer nombre desde h1 de la cabecera
+    const h1 = $('h1.text-3xl, h1.text-4xl').first();
+    if (h1.length) {
+      profile.nombre = this.cleanText(h1.text());
+    }
+
+    // Buscar la sección "DATOS DE LA EMPRESA" con grid layout
+    const section = $('h2:contains("DATOS DE LA EMPRESA")').next('div.grid');
     if (!section.length) return;
 
-    const items = section.find('li').toArray();
-    for (const li of items) {
-      const $li = $(li);
-      const label = $li.find('strong').first().text().trim().toUpperCase();
-      const value = $li.find('span').first().text().trim();
+    // Cada campo es un div con bg-gray-50.rounded-lg
+    const items = section.find('.bg-gray-50.rounded-lg').toArray();
 
-      if (!label || (!value && !label.includes('WEB') && !label.includes('PROVEEDOR'))) continue;
+    for (const item of items) {
+      const $item = $(item);
+      const label = $item.find('.text-xs.text-gray-500.uppercase.font-medium').text().trim().toUpperCase();
+      const valueEl = $item.find('.text-sm.font-semibold.text-gray-900');
+      let value = valueEl.text().trim();
+
+      const linkInValue = valueEl.find('a');
+      if (linkInValue.length) {
+        value = linkInValue.text().trim();
+      }
+
+      if (!label) continue;
 
       switch (true) {
-        case label === 'NOMBRE':
-          profile.nombre = value || null;
+        case label.includes('RUC'):
           break;
-        case label === 'RUC':
-          // Ya lo tenemos, pero validamos
+        case label.includes('TIPO CONTRIBUYENTE'):
+          profile.tipo = this.cleanText(value) || null;
           break;
-        case label === 'INICIO':
-          profile.fechaInicio = value || null;
-          break;
-        case label.includes('INSCRIPCI'):
-          profile.fechaInscripcion = value || null;
-          break;
-        case label === 'ESTADO':
+        case label.includes('ESTADO CONTRIBUYENTE'):
           profile.estado = value || null;
           break;
-        case label === 'TIPO':
-          profile.tipo = value.replace(/\s+/g, ' ').trim() || null;
+        case label.includes('FECHA INSCRIPCI'):
+          profile.fechaInscripcion = value || null;
           break;
-        case label === 'CIIU':
-          profile.ciiu = value.trim() || null;
+        case label.includes('FECHA INICIO'):
+          profile.fechaInicio = value || null;
           break;
-        case label.startsWith('DIRECCI') && !label.includes('DOMICILIO'):
-          profile.direccion = this.cleanText(
-            $li.find('span a').text() || value,
-          );
-          break;
-        case label === 'REFERENCIA':
-          profile.referencia = value || null;
-          break;
-        case label === 'DEPARTAMENTO':
-          profile.departamento = value || null;
-          break;
-        case label === 'PROVINCIA':
-          profile.provincia = value || null;
-          break;
-        case label === 'DISTRITO':
-          profile.distrito = value || null;
-          break;
-        case label.startsWith('PA'):
-          if (value && value.length <= 30) profile.pais = value;
-          break;
-        case label.startsWith('TEL'): {
-          const phone = $li.find('a[href^="tel:"]').text().trim() || value;
-          if (phone && phone !== '-') profile.telefonos.push(phone);
-          break;
-        }
-        case label.includes('WEB'): {
-          const webHref = $li.find('strong a[href]').attr('href');
-          if (webHref && webHref.startsWith('http')) profile.web = webHref;
-          break;
-        }
-        case label.includes('PROVEEDOR'):
-          // El valor está en el siguiente <li> con color verde
+        case label.startsWith('TELEFONO') || label.includes('TEL'):
+          if (value && value !== '-' && !label.includes('COMPROBANTE')) {
+            profile.telefonos.push(value);
+          }
           break;
       }
     }
 
-    // Proveedor del estado — buscar "SI" en color verde después de "PROVEEDOR"
-    const proveedorLi = section.find('strong:contains("PROVEEDOR")').closest('li');
-    if (proveedorLi.length) {
-      const nextLi = proveedorLi.next('li');
-      const provText = nextLi.find('strong').text().trim().toUpperCase();
-      profile.proveedorEstado = provText === 'SI';
+    // Buscar Domicilio Fiscal en todo el body (está después del grid)
+    const domItems = $('body').find('.bg-gray-50.rounded-lg').toArray();
+    for (const item of domItems) {
+      const $item = $(item);
+      const label = $item.find('.text-xs.text-gray-500.uppercase.font-medium').text().trim().toUpperCase();
+      if (label.includes('DOMICILIO FISCAL')) {
+        const value = $item.find('.text-sm.font-semibold.text-gray-900').text().trim();
+        if (value && !profile.direccion) {
+          profile.direccion = this.cleanText(value);
+        }
+        const ubigeoText = $item.find('.text-sm.text-gray-600').text().trim();
+        if (ubigeoText) {
+          const ubigeoMatch = ubigeoText.match(/([A-ZÀ-Ú\s]+)\s*-\s*([A-ZÀ-Ú\s]+)\s*-\s*([A-ZÀ-Ú\s]+)/i);
+          if (ubigeoMatch) {
+            profile.departamento = ubigeoMatch[1]?.trim() || null;
+            profile.provincia = ubigeoMatch[2]?.trim() || null;
+            profile.distrito = ubigeoMatch[3]?.trim() || null;
+          }
+        }
+        break;
+      }
+    }
+
+    // Extraer web desde la cabecera (buscar enlaces externos)
+    const links = $('a[href]').toArray();
+    for (const a of links) {
+      const href = $(a).attr('href') || '';
+      if (href.startsWith('http') && !href.includes('datosperu') && !href.includes('google') && !href.includes('facebook')) {
+        profile.web = href;
+        break;
+      }
     }
   }
 
-  // ── Descripción (párrafo largo, normalmente del Top300) ──
+  // ── Descripción (bloque DESCRIPCION con logo) ──
   private parseDescripcion(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    const descP = $('p.post').first();
-    if (descP.length) {
-      const text = descP.text().trim();
-      if (text.length > 50) {
-        profile.descripcion = text;
+    // Buscar sección DESCRIPCIÓN con texto .text-gray-700.leading-relaxed
+    const descSection = $('h2:contains("DESCRIPCIÓN")');
+    if (descSection.length) {
+      const descP = descSection.next('div').find('.text-gray-700.leading-relaxed, p.text-gray-700').first();
+      if (descP.length) {
+        const text = descP.text().trim();
+        if (text.length > 50) {
+          profile.descripcion = text;
+        }
       }
     }
-  }
 
-  // ── Sector económico ──
-  private parseSectorEconomico(
-    $: cheerio.CheerioAPI,
-    profile: DatosPeruProfile,
-  ): void {
-    const h4 = $('h4:contains("SECTOR ECONÓMICO")');
-    if (h4.length) {
-      const nextA = h4.next('a, p, span, div').find('a').first();
-      if (nextA.length) {
-        profile.sectorEconomico = nextA.text().trim() || null;
-      } else {
-        // Buscar el texto después del h4
-        const parent = h4.parent();
-        const links = parent.find('a');
-        if (links.length) {
-          profile.sectorEconomico = links.first().text().trim() || null;
+    // Fallback: buscar cualquier p.text-gray-700.leading-relaxed
+    if (!profile.descripcion) {
+      const descP = $('.text-gray-700.leading-relaxed, p.text-gray-700').first();
+      if (descP.length) {
+        const text = descP.text().trim();
+        if (text.length > 50) {
+          profile.descripcion = text;
         }
       }
     }
   }
 
-  // ── Comercio exterior ──
-  private parseComercioExterior(
+  // ── Actividades Económicas (CIIU) - nueva estructura Astro ──
+  private parseSectorEconomico(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    const h4 = $('h4:contains("COMERCIO EXTERIOR")');
-    if (h4.length) {
-      const parent = h4.parent();
-      const text = parent.text().replace(/MARCA DE ACTIVIDAD DE COMERCIO EXTERIOR/gi, '').trim();
-      if (text) {
-        profile.marcaComercioExterior = text.split('\n')[0]?.trim() || null;
+    // Buscar sección "Actividades Económicas" con los badges CIIU
+    const section = $('h3:contains("Actividades Económicas"), h3.text-sm.font-semibold:contains("Actividades")');
+    if (section.length) {
+      // Extraer todos los CIIU badges
+      const ciiuBadges = section.closest('div').find('span.inline-flex.items-center.px-2.py-0\\.5.rounded.text-xs.font-medium.bg-teal-600.text-white');
+      if (ciiuBadges.length) {
+        // El primer CIIU es el principal
+        const mainCiiu = ciiuBadges.first().text().match(/CIIU:\s*(\d+)/i);
+        if (mainCiiu) {
+          profile.ciiu = mainCiiu[1];
+        }
+        // Extraer sector desde los links de actividad
+        const activityLinks = section.closest('div').find('a.text-sm.text-teal-700');
+        if (activityLinks.length) {
+          profile.sectorEconomico = activityLinks.first().text().trim() || null;
+        }
+      }
+    }
+
+    // Fallback: buscar cualquier badge con CIIU
+    if (!profile.ciiu) {
+      const ciiuBadge = $('span:contains("CIIU")').first();
+      if (ciiuBadge.length) {
+        const ciiuMatch = ciiuBadge.text().match(/CIIU:\s*(\d+)/i);
+        if (ciiuMatch) {
+          profile.ciiu = ciiuMatch[1];
+        }
       }
     }
   }
 
-  // ── Ejecutivos / Directores ──
+  // ── Comercio exterior (Actividad Comercio Exterior) ──
+  private parseComercioExterior(
+    $: cheerio.CheerioAPI,
+    profile: DatosPeruProfile,
+  ): void {
+    // Buscar en los datos de la empresa el campo "Actividad Comercio Exterior"
+    // Es un div con label "ACTIVIDAD COMERCIO EXTERIOR" y valor "SIN ACTIVIDAD" o similar
+    const items = $('.bg-gray-50.rounded-lg, .flex.items-start.gap-3').toArray();
+    for (const item of items) {
+      const $item = $(item);
+      const label = $item.find('.text-xs.text-gray-500').text().trim().toUpperCase();
+      if (label.includes('ACTIVIDAD COMERCIO EXTERIOR')) {
+        const value = $item.find('.text-sm.font-semibold.text-gray-900').text().trim();
+        if (value) {
+          profile.marcaComercioExterior = value;
+        }
+        break;
+      }
+    }
+
+    // También buscar en la descripción de la empresa
+    if (!profile.marcaComercioExterior) {
+      const extraSection = $('h4:contains("COMERCIO EXTERIOR"), h3:contains("Comercio Exterior")');
+      if (extraSection.length) {
+        const text = extraSection.closest('div').find('.text-sm').text().trim();
+        if (text && text.length < 50) {
+          profile.marcaComercioExterior = text;
+        }
+      }
+    }
+  }
+
+  // ── Ejecutivos / Directores (tabla semántica) ──
   private parseEjecutivos(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    const h4 = $('h4:contains("EJECUTIVOS")');
-    if (!h4.length) return;
+    // Buscar tabla de ejecutivos - tiene header "ALGUNOS DE LOS PRINCIPALES EJECUTIVOS"
+    // ythead th: Nombre, Cargo, Desde
+    const h2 = $('h2:contains("ALGUNOS DE LOS PRINCIPALES EJECUTIVOS")');
+    if (!h2.length) return;
 
-    const container = h4.parent();
-    const items = container.find('.col-sm-12 a').toArray();
+    const table = h2.next('div').find('table').first();
+    if (!table.length) return;
 
-    for (const a of items) {
-      const text = $(a).text().trim();
-      if (!text) continue;
+    const rows = table.find('tbody tr').toArray();
 
-      const exec = this.parseExecutiveText(text);
-      if (exec) {
-        profile.ejecutivos.push(exec);
+    for (const row of rows) {
+      const $row = $(row);
+      const cells = $row.find('td').toArray().map((td) => $(td).text().trim());
+
+      if (cells.length >= 3) {
+        const nombre = cells[0]?.replace(/\s+/g, ' ').trim() || '';
+        const cargo = cells[1]?.replace(/\s+/g, ' ').trim() || '';
+        const desde = cells[2]?.replace(/\s+/g, ' ').trim() || null;
+
+        // Limpiar nombre: quitar badges "X empresas"
+        const cleanNombre = nombre.replace(/\d+\s*empresas\s*/gi, '').trim();
+
+        if (cleanNombre && cargo) {
+          profile.ejecutivos.push({
+            cargo,
+            nombre: cleanNombre,
+            desde: desde && desde !== '-' ? desde : null,
+          });
+        }
       }
     }
   }
@@ -828,23 +895,46 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     return { cargo, nombre, desde };
   }
 
-  // ── Establecimientos anexos ──
+  // ── Establecimientos anexos (localesTable) ──
   private parseEstablecimientos(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    const container = $('#grid_anexos');
-    if (!container.length) return;
+    // Buscar tabla de establecimientos: #localesTable
+    const table = $('#localesTable');
+    if (!table.length) {
+      // Fallback: buscar por header "Establecimientos"
+      const h2 = $('h2:contains("ESTABLECIMIENTOS")');
+      if (h2.length) {
+        const candidate = h2.next('div').find('table').first();
+        if (candidate.length) {
+          this.extractBranchesFromTable($, candidate, profile);
+        }
+      }
+      return;
+    }
 
-    const items = container.find('.col-sm-12 a').toArray();
+    this.extractBranchesFromTable($, table, profile);
+  }
 
-    for (const a of items) {
-      const text = $(a).text().replace(/[→\s]+/g, ' ').trim();
-      if (!text || text.length < 5) continue;
+  private extractBranchesFromTable($: cheerio.CheerioAPI, table: any, profile: DatosPeruProfile): void {
+    // La tabla tiene headers: Dirección, Tipo Establecimiento
+    const rows = table.find('tbody tr').toArray();
 
-      const branch = this.parseBranchText(text);
-      if (branch) {
-        profile.establecimientosAnexos.push(branch);
+    for (const row of rows) {
+      const $row = $(row);
+      const cells = $row.find('td').toArray().map((td) => $(td).text().trim());
+
+      if (cells.length >= 2) {
+        const direccion = cells[0]?.replace(/\s+/g, ' ').trim() || '';
+        const tipo = cells[1]?.replace(/\s+/g, ' ').trim() || null;
+
+        if (direccion && direccion.length > 5) {
+          profile.establecimientosAnexos.push({
+            direccion,
+            ubicacion: tipo,
+          });
+        }
       }
     }
   }
@@ -863,12 +953,16 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     };
   }
 
-  // ── Historial de trabajadores ──
+  // ── Historial de trabajadores (puede estar en tab INFO HISTORICA) ──
   private parseHistorialTrabajadores(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    const h4 = $('h4:contains("CANTIDAD DE TRABAJADORES")');
+    // Buscar en tab content de info-historica o directamente en el HTML
+    const tabContent = $('[data-tab-content="info-historica"]');
+    const searchContext = tabContent.length ? tabContent : $('body');
+
+    const h4 = searchContext.find('h4:contains("CANTIDAD DE TRABAJADORES")');
     if (!h4.length) return;
 
     const table = h4.next('table').length
@@ -894,12 +988,16 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     }
   }
 
-  // ── Info histórica ──
+  // ── Info histórica (puede estar en tab INFO HISTORICA) ──
   private parseInfoHistorica(
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    const h2 = $('h2:contains("INFORMACIÓN HISTORICA"), h2:contains("INFORMACION HISTORICA")');
+    // Buscar en tab content de info-historica o directamente en el HTML
+    const tabContent = $('[data-tab-content="info-historica"]');
+    const searchContext = tabContent.length ? tabContent : $('body');
+
+    const h2 = searchContext.find('h2:contains("INFORMACIÓN HISTORICA"), h2:contains("INFORMACION HISTORICA"), h2:contains("INFO HISTORICA")');
     if (!h2.length) return;
 
     const container = h2.parent();
@@ -945,14 +1043,25 @@ export class DatosPeruHttpAdapter implements DatosPeruEnrichmentPort, OnModuleIn
     $: cheerio.CheerioAPI,
     profile: DatosPeruProfile,
   ): void {
-    // Logo del Top300 o similar
-    const img = $('img[src*="top300"]').first();
+    // Buscar logo en la sección DESCRIPCIÓN: img con src="/api/uploads/top300/..."
+    const descSection = $('h2:contains("DESCRIPCIÓN")');
+    if (descSection.length) {
+      const img = descSection.next('div').find('img[src*="/api/uploads/top300/"]').first();
+      if (img.length) {
+        const src = img.attr('src');
+        if (src) {
+          profile.logoUrl = src.startsWith('http') ? src : `${BASE_URL}${src}`;
+          return;
+        }
+      }
+    }
+
+    // Fallback: cualquier img con /api/uploads/top300/
+    const img = $('img[src*="/api/uploads/top300/"]').first();
     if (img.length) {
       const src = img.attr('src');
       if (src) {
-        profile.logoUrl = src.startsWith('http')
-          ? src
-          : `${BASE_URL}/${src.replace(/^\//, '')}`;
+        profile.logoUrl = src.startsWith('http') ? src : `${BASE_URL}${src}`;
       }
     }
   }
